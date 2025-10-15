@@ -33,6 +33,29 @@ def extract_string(inlines):
     return ''.join(text)
 
 
+def strip_formatting_from_inlines(inlines):
+    """Remove Strong and Emph formatting from inline elements while preserving text"""
+    if not inlines:
+        return []
+
+    result = []
+    for inline in inlines:
+        if isinstance(inline, dict):
+            inline_type = inline.get('t')
+            if inline_type in ['Strong', 'Emph']:
+                # Unwrap the formatting and recursively strip from content
+                content = inline.get('c', [])
+                if isinstance(content, list):
+                    result.extend(strip_formatting_from_inlines(content))
+            else:
+                # Keep other inline types as-is (Str, Space, Code, etc.)
+                result.append(inline)
+        else:
+            result.append(inline)
+
+    return result
+
+
 def process_blocks(blocks):
     """Process a list of blocks, converting special Divs to Headers and fixing list spacing"""
     new_blocks = []
@@ -65,11 +88,11 @@ def process_blocks(blocks):
                         # Remove the DefinitionList from new_blocks and add as header
                         if new_blocks and new_blocks[-1] == prev_block:
                             new_blocks.pop()
-                            # Keep original formatting in header
+                            # Strip formatting from header
                             header_level = current_level + 1 if current_level > 0 else 3
                             header = {
                                 't': 'Header',
-                                'c': [header_level, ['', [], []], term_inlines]
+                                'c': [header_level, ['', [], []], strip_formatting_from_inlines(term_inlines)]
                             }
                             new_blocks.append(header)
 
@@ -120,7 +143,14 @@ def process_blocks(blocks):
         # Update current level when we see a Header
         if block_type == 'Header':
             current_level = block['c'][0]  # First element is the level
-            new_blocks.append(block)
+            # Strip formatting from existing headers
+            header_attrs = block['c'][1]
+            header_inlines = block['c'][2]
+            stripped_header = {
+                't': 'Header',
+                'c': [current_level, header_attrs, strip_formatting_from_inlines(header_inlines)]
+            }
+            new_blocks.append(stripped_header)
             prev_was_list_item = False
 
         # Convert formalpara Div to Header
@@ -135,12 +165,12 @@ def process_blocks(blocks):
                 first_block = content[0]
                 if first_block.get('t') == 'Para':
                     para_inlines = first_block.get('c', [])
-                    # Create header with original formatting preserved
+                    # Create header with formatting stripped
                     header_level = current_level + 1
 
                     header = {
                         't': 'Header',
-                        'c': [header_level, ['', [], []], para_inlines]
+                        'c': [header_level, ['', [], []], strip_formatting_from_inlines(para_inlines)]
                     }
                     new_blocks.append(header)
                 else:
@@ -205,7 +235,7 @@ def main():
         if book_title_inlines:
             title_header = {
                 't': 'Header',
-                'c': [1, ['', [], []], book_title_inlines]
+                'c': [1, ['', [], []], strip_formatting_from_inlines(book_title_inlines)]
             }
             doc['blocks'].insert(0, title_header)
 
