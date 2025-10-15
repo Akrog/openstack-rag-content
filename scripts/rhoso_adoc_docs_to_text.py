@@ -18,7 +18,6 @@
 import argparse
 from pathlib import Path
 import logging
-from lightspeed_rag_content.asciidoc import AsciidoctorConverter
 from packaging.version import Version
 from typing import Generator, Tuple
 import xml.etree.ElementTree as ET
@@ -28,6 +27,9 @@ import tempfile
 
 LOG = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
+
+# Output file extension for converted documents
+OUTPUT_FILE_EXTENSION = ".txt"
 
 DEFAULT_EXCLUDE_TITLES = [
     "hardening_red_hat_openstack_services_on_openshift",  # Replaced by ./configuring_security_services and ./performing_security_operations
@@ -182,7 +184,7 @@ def red_hat_docs_path(
             LOG.info(f"Remapping {path_title} to {new_path_title}.")
             path_title = new_path_title
 
-        yield Path(file), output_dir / path_title / "master.txt"
+        yield Path(file), output_dir / path_title / f"master{OUTPUT_FILE_EXTENSION}"
 
 
 def red_hat_relnotes_path(
@@ -201,19 +203,135 @@ def red_hat_relnotes_path(
         f"{ver_string}-[0-9]*/assembly_release-information-{ver_string}-[0-9]*.adoc"
     )
     for file in input_dir.rglob(globstring):
-        if match := re.search(f"{ver_string}-\d+/.*-(\d+).adoc", str(file)):
+        if match := re.search(rf"{ver_string}-\d+/.*-(\d+).adoc", str(file)):
             minor_ver_string = match.group(1).replace(".", "-")
             yield (
                 Path(file),
-                output_dir / f"release-notes/{ver_string}-{minor_ver_string}.txt",
+                output_dir / f"release-notes/{ver_string}-{minor_ver_string}{OUTPUT_FILE_EXTENSION}",
             )
         else:
             LOG.warning(f"Failed to detect minor_ver of {file} with regex, skipping.")
 
 
+def preprocess_adoc_tables(content: str) -> str:
+    """Preprocess AsciiDoc content to fix common table issues.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+
+    Returns:
+        Preprocessed content with table issues fixed
+    """
+    lines = content.split('\n')
+    new_lines = []
+    in_table = False
+    table_start_idx = -1
+    table_lines = []
+
+    for i, line in enumerate(lines):
+        # Detect table start
+        if line.startswith('|==='):
+            if not in_table:
+                # Starting a new table
+                in_table = True
+                table_start_idx = len(new_lines)
+                table_lines = [line]
+            else:
+                # Ending a table
+                table_lines.append(line)
+
+                # Check if table has at least one body row
+                # Table structure: |===, optional header row, body rows, |===
+                # Body rows are those that contain | and are not the delimiters
+                body_rows = [l for l in table_lines[1:-1] if l.strip() and not l.startswith('|===')]
+
+                if len(body_rows) == 0:
+                    # Empty table - add a placeholder row
+                    LOG.warning(f"Found empty table at line {table_start_idx}, adding placeholder row")
+                    # Insert a placeholder row before the closing |===
+                    table_lines.insert(-1, '| N/A | N/A')
+
+                new_lines.extend(table_lines)
+                in_table = False
+                table_lines = []
+        elif in_table:
+            table_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    # Handle case where table wasn't closed
+    if in_table and table_lines:
+        LOG.warning(f"Found unclosed table, closing it")
+        table_lines.append('|===')
+        new_lines.extend(table_lines)
+
+    return '\n'.join(new_lines)
+
+
+def preprocess_xml_list_titles(xml_content: str) -> str:
+    """Preprocess XML to convert list titles to formalpara elements.
+
+    Pandoc doesn't preserve <itemizedlist><title> or <orderedlist><title> elements
+    when converting from DocBook. This function converts them to <formalpara><title>
+    elements which pandoc does convert to Div.formalpara-title.
+
+    Args:
+        xml_content: The DocBook XML content as a string
+
+    Returns:
+        Preprocessed XML with list titles converted to formalpara
+    """
+    import xml.etree.ElementTree as ET_
+
+    try:
+        # Parse the XML
+        root = ET_.fromstring(xml_content)
+
+        # Define the DocBook namespace
+        ns = {'db': 'http://docbook.org/ns/docbook'}
+
+        # Find all itemizedlist and orderedlist elements with title children
+        for list_type in ['itemizedlist', 'orderedlist']:
+            for list_elem in root.findall(f'.//{{{ns["db"]}}}{list_type}', ns):
+                # Check if it has a title child
+                title_elem = list_elem.find(f'{{{ns["db"]}}}title', ns)
+                if title_elem is not None:
+                    # Get the parent of the list
+                    parent = None
+                    for potential_parent in root.iter():
+                        if list_elem in potential_parent:
+                            parent = potential_parent
+                            break
+
+                    if parent is not None:
+                        # Get the index of the list in its parent
+                        list_index = list(parent).index(list_elem)
+
+                        # Remove the title from the list
+                        list_elem.remove(title_elem)
+
+                        # Create a formalpara element with the title
+                        formalpara = ET_.Element(f'{{{ns["db"]}}}formalpara')
+                        # Move the title to the formalpara
+                        formalpara.append(title_elem)
+                        # Add an empty para as formalpara requires it
+                        para = ET_.SubElement(formalpara, f'{{{ns["db"]}}}para')
+
+                        # Insert the formalpara before the list
+                        parent.insert(list_index, formalpara)
+
+        # Convert back to string
+        return ET_.tostring(root, encoding='unicode')
+    except Exception as e:
+        LOG.warning(f"Failed to preprocess XML list titles: {e}")
+        # Return original content if preprocessing fails
+        return xml_content
+
+
 class RelNotesConverter:
     """Convert AsciiDoc release notes to Markdown using asciidoctor and pandoc."""
     PANDOC_FILTER_PATH = (Path(__file__).parent / "pandoc-release_notes-filter.py").absolute()
+    PANDOC_LUA_FILTER_PATH = (Path(__file__).parent / "tightlists.lua").absolute()
 
     def __init__(self, attributes_file: Path | None = None):
         self.attributes_file = attributes_file
@@ -275,6 +393,7 @@ class RelNotesConverter:
                     "--wrap=preserve",
                     "-t", "markdown_strict",
                     f"--filter={self.PANDOC_FILTER_PATH}",
+                    f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
                     str(xml_temp_path.absolute()),
                     "-o", str(output_path.absolute()),
                 ]
@@ -292,12 +411,143 @@ class RelNotesConverter:
                     adoc_temp.close()
 
 
+class DocsConverter:
+    """Convert AsciiDoc documentation to Markdown using asciidoctor and pandoc."""
+    PANDOC_FILTER_PATH = (Path(__file__).parent / "pandoc-docs-filter.py").absolute()
+    PANDOC_LUA_FILTER_PATH = (Path(__file__).parent / "tightlists.lua").absolute()
+
+    def __init__(self, attributes_file: Path | None = None):
+        self.attributes_file = attributes_file
+
+    def convert(self, input_path: Path, output_path: Path) -> None:
+        """Convert documentation from AsciiDoc to Markdown.
+
+        This method uses a multi-step conversion process:
+        1. Preprocess AsciiDoc to fix common table issues
+        2. Convert AsciiDoc to DocBook5 XML using asciidoctor
+        3. Preprocess XML to convert list titles to formalpara elements
+        4. Convert DocBook5 XML to Markdown using pandoc with custom filters
+
+        Args:
+            input_path: Path to input .adoc file
+            output_path: Path to output .txt (markdown) file
+
+        Raises:
+            subprocess.CalledProcessError: If asciidoctor or pandoc command fails
+        """
+        LOG.info("Processing: %s", str(input_path.absolute()))
+
+        # Create output directory if it doesn't exist
+        if not output_path.exists():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            LOG.warning(
+                "Destination file %s exists. It will be overwritten!",
+                output_path,
+            )
+
+        # Create temporary files for the conversion process
+        adoc_temp = None
+        preprocessed_temp = None
+        try:
+            # Read and preprocess the input file
+            with open(input_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            preprocessed_content = preprocess_adoc_tables(content)
+
+            # Create temporary file with preprocessed content
+            preprocessed_temp = tempfile.NamedTemporaryFile(mode='w', suffix='.adoc', delete=False, encoding='utf-8')
+            preprocessed_temp.write(preprocessed_content)
+            preprocessed_temp.flush()
+            preprocessed_temp.close()
+            preprocessed_path = Path(preprocessed_temp.name)
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as xml_temp:
+                xml_temp_path = Path(xml_temp.name)
+                xml_temp.close()
+
+                try:
+                    # If attributes file is provided, create a wrapper file with includes
+                    if self.attributes_file:
+                        adoc_temp = tempfile.NamedTemporaryFile(mode="w", suffix=".adoc", delete=False, encoding='utf-8')
+                        adoc_temp.write(f"include::{self.attributes_file.absolute()}[]\n\ninclude::{preprocessed_path.absolute()}[]\n")
+                        adoc_temp.flush()
+                        adoc_temp.close()
+                        input_for_conversion = Path(adoc_temp.name)
+                    else:
+                        input_for_conversion = preprocessed_path
+
+                    # Step 1: Convert AsciiDoc to DocBook5 XML
+                    asciidoctor_cmd = [
+                        "asciidoctor",
+                        "-b", "docbook5",
+                        "-a", "fn-private=pass",
+                        "-o", str(xml_temp_path.absolute()),
+                        str(input_for_conversion.absolute()),
+                    ]
+                    result = subprocess.run(asciidoctor_cmd, check=True, capture_output=True, text=True)
+                    if result.stderr:
+                        LOG.warning("asciidoctor warnings for %s:\n%s", input_path, result.stderr)
+
+                    # Step 1.5: Preprocess XML to convert list titles to formalpara
+                    with open(xml_temp_path, 'r', encoding='utf-8') as f:
+                        xml_content = f.read()
+
+                    preprocessed_xml = preprocess_xml_list_titles(xml_content)
+
+                    with open(xml_temp_path, 'w', encoding='utf-8') as f:
+                        f.write(preprocessed_xml)
+
+                    # Step 2: Convert DocBook5 XML to Markdown using pandoc with filter
+                    pandoc_cmd = [
+                        "pandoc",
+                        "-f", "docbook",
+                        "--wrap=preserve",
+                        "-t", "markdown_strict",
+                        f"--filter={self.PANDOC_FILTER_PATH}",
+                        f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
+                        str(xml_temp_path.absolute()),
+                        "-o", str(output_path.absolute()),
+                    ]
+                    subprocess.run(pandoc_cmd, check=True, capture_output=True, text=True)
+
+                    LOG.info("Successfully converted: %s -> %s", input_path, output_path)
+
+                except subprocess.CalledProcessError as e:
+                    LOG.error("Failed to convert: %s -> %s", input_path, output_path)
+                    LOG.error("Command: %s", ' '.join(e.cmd))
+                    LOG.error("Return code: %s", e.returncode)
+                    if e.stdout:
+                        LOG.error("stdout: %s", e.stdout.decode() if isinstance(e.stdout, bytes) else e.stdout)
+                    if e.stderr:
+                        LOG.error("stderr: %s", e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr)
+                    raise
+
+                except Exception as e:
+                    LOG.error("Failed to convert: %s -> %s (%s)", input_path, output_path, e)
+                    raise
+
+                finally:
+                    # Clean up temporary files
+                    if xml_temp_path.exists():
+                        xml_temp_path.unlink()
+                    if adoc_temp and Path(adoc_temp.name).exists():
+                        Path(adoc_temp.name).unlink()
+                    if preprocessed_temp and preprocessed_path.exists():
+                        preprocessed_path.unlink()
+
+        except Exception as e:
+            LOG.error("Failed during preprocessing: %s (%s)", input_path, e)
+            raise
+
+
 if __name__ == "__main__":
     parser = get_argument_parser()
     args = parser.parse_args()
 
     if args.input_dir:
-        adoc_text_converter = AsciidoctorConverter(attributes_file=args.attributes_file)
+        docs_converter = DocsConverter(attributes_file=args.attributes_file)
         for input_path, output_path in red_hat_docs_path(
             args.input_dir,
             args.output_dir,
@@ -305,7 +555,7 @@ if __name__ == "__main__":
             args.exclude_titles,
             args.remap_titles,
         ):
-            adoc_text_converter.convert(input_path, output_path)
+            docs_converter.convert(input_path, output_path)
 
     if args.relnotes_dir:
         relnotes_converter = RelNotesConverter(attributes_file=args.attributes_file)
