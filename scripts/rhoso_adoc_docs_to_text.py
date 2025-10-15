@@ -1585,6 +1585,14 @@ class RelNotesConverter:
                 ]
                 subprocess.run(pandoc_cmd, check=True, capture_output=True)
 
+                # Step 3: Compact pipe tables by removing extra spaces before pipes
+                compact_cmd = [
+                    'sed', '-i', '-E',
+                    's/ +\\|/ |/g',
+                    str(output_path.absolute())
+                ]
+                subprocess.run(compact_cmd, check=True)
+
                 LOG.info("Successfully converted: %s -> %s", input_path, output_path)
 
             except Exception as e:
@@ -1742,6 +1750,14 @@ class DocsConverter:
                         "-o", str(output_path.absolute()),
                     ]
                     subprocess.run(pandoc_cmd, check=True, capture_output=True, text=True)
+
+                    # Step 3: Compact pipe tables by removing extra spaces before pipes
+                    compact_cmd = [
+                        'sed', '-i', '-E',
+                        's/ +\\|/ |/g',
+                        str(output_path.absolute())
+                    ]
+                    subprocess.run(compact_cmd, check=True)
 
                     LOG.info("Successfully converted: %s -> %s", input_path, output_path)
 
