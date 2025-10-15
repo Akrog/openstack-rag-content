@@ -892,7 +892,6 @@ def fix_adoc_file(file_path: Path) -> list[str]:
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            LOG.info(f"Fixed {file_path}: {len(all_fixes)} issue(s)")
         except Exception as e:
             LOG.error(f"Failed to write fixes to {file_path}: {e}")
             return []
