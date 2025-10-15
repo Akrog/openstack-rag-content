@@ -220,6 +220,264 @@ def red_hat_relnotes_path(
             LOG.warning(f"Failed to detect minor_ver of {file} with regex, skipping.")
 
 
+def detect_block_language(block_lines: list[str]) -> str:
+    """Detect the programming/markup language in a code block.
+
+    Args:
+        block_lines: Lines of code from the block
+
+    Returns:
+        Detected language string (yaml, bash, python, etc.)
+    """
+    # Join lines for analysis
+    content = '\n'.join(block_lines)
+
+    # YAML indicators (most common in OpenStack docs)
+    yaml_indicators = [
+        r'^\s*\w+:\s*$',  # Key with no value (multiline)
+        r'^\s*\w+:\s+\S+',  # Key: value pairs
+        r'^\s*-\s+\w+:',  # List items with keys
+        r'apiVersion:',  # Kubernetes/OpenStack CRD
+        r'kind:',  # Kubernetes/OpenStack CRD
+        r'metadata:',  # Common YAML structure
+        r'spec:',  # Common YAML structure
+    ]
+
+    # Bash/shell indicators
+    bash_indicators = [
+        r'^\s*#\s*!/bin/(ba)?sh',  # Shebang
+        r'^\s*\$\s+',  # Command prompt
+        r'^\s*(sudo|export|source|echo|cd|ls|cat|grep)\s+',  # Common commands
+        r'if\s+\[.*\];\s*then',  # Bash conditionals
+    ]
+
+    # INI/config file indicators
+    ini_indicators = [
+        r'^\s*\[[\w_-]+\]',  # Section headers like [DEFAULT]
+        r'^\s*[\w_-]+\s*=\s*',  # Key = value pairs
+    ]
+
+    # Python indicators
+    python_indicators = [
+        r'^\s*import\s+',
+        r'^\s*from\s+\w+\s+import',
+        r'^\s*def\s+\w+\(',
+        r'^\s*class\s+\w+',
+    ]
+
+    # XML indicators
+    xml_indicators = [
+        r'^\s*<\?xml',
+        r'^\s*<[\w:-]+>.*</[\w:-]+>',
+    ]
+
+    # JSON indicators
+    json_indicators = [
+        r'^\s*[{\[]',  # Starts with { or [
+        r'"\w+"\s*:\s*',  # JSON key-value
+    ]
+
+    # Count matches for each language
+    scores = {
+        'yaml': sum(1 for pattern in yaml_indicators if re.search(pattern, content, re.MULTILINE)),
+        'bash': sum(1 for pattern in bash_indicators if re.search(pattern, content, re.MULTILINE)),
+        'ini': sum(1 for pattern in ini_indicators if re.search(pattern, content, re.MULTILINE)),
+        'python': sum(1 for pattern in python_indicators if re.search(pattern, content, re.MULTILINE)),
+        'xml': sum(1 for pattern in xml_indicators if re.search(pattern, content, re.MULTILINE)),
+        'json': sum(1 for pattern in json_indicators if re.search(pattern, content, re.MULTILINE)),
+    }
+
+    # Get language with highest score
+    if max(scores.values()) > 0:
+        detected = max(scores.items(), key=lambda x: x[1])[0]
+        return detected
+
+    # Default to yaml as it's most common in OpenStack docs
+    return 'yaml'
+
+
+def preprocess_adoc_callout_numbering(content: str) -> str:
+    """Renumber callouts to be sequential across the entire document.
+
+    AsciiDoctor expects callouts to be numbered sequentially across the entire
+    document, not restarting at <1> for each code block. This function finds
+    all callouts and renumbers them globally.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+
+    Returns:
+        Content with callouts renumbered sequentially
+    """
+    lines = content.split('\n')
+    global_callout_number = 1
+    renumber_map = {}  # Maps (block_index, local_number) -> global_number
+    block_callouts = []  # List of (block_index, [local_numbers_in_order])
+    block_index = 0
+    in_block = False
+    current_block_callouts = []
+
+    # First pass: identify all callouts in blocks and build renumber map
+    for i, line in enumerate(lines):
+        if line.strip() == '----':
+            if not in_block:
+                in_block = True
+                current_block_callouts = []
+                block_index += 1
+            else:
+                in_block = False
+                if current_block_callouts:
+                    block_callouts.append((block_index, list(current_block_callouts)))
+        elif in_block:
+            # Find callouts in this line
+            for match in re.finditer(r'<(\d+)>', line):
+                local_num = int(match.group(1))
+                if local_num not in current_block_callouts:
+                    current_block_callouts.append(local_num)
+                    renumber_map[(block_index, local_num)] = global_callout_number
+                    global_callout_number += 1
+
+    if not renumber_map:
+        # No callouts to renumber
+        return content
+
+    # Second pass: apply renumbering to both block callouts and callout definitions
+    new_lines = []
+    in_block = False
+    block_index = 0
+    callout_definition_pattern = re.compile(r'^<(\d+)>\s+')
+    # Track which block we're processing definitions for
+    definition_block_queue = list(block_callouts)  # Queue of (block_index, [local_nums])
+    current_definition_block = None
+    current_definition_callouts = []
+    definition_index = 0
+
+    for i, line in enumerate(lines):
+        if line.strip() == '----':
+            if not in_block:
+                in_block = True
+                block_index += 1
+            else:
+                in_block = False
+            new_lines.append(line)
+        elif in_block:
+            # Renumber callouts in code blocks
+            new_line = line
+            for match in reversed(list(re.finditer(r'<(\d+)>', line))):
+                local_num = int(match.group(1))
+                if (block_index, local_num) in renumber_map:
+                    global_num = renumber_map[(block_index, local_num)]
+                    new_line = new_line[:match.start()] + f'<{global_num}>' + new_line[match.end():]
+            new_lines.append(new_line)
+        else:
+            # Check if this is a callout definition line
+            match = callout_definition_pattern.match(line)
+            if match:
+                local_num = int(match.group(1))
+
+                # If we haven't set up the current definition block yet, or we've
+                # processed all callouts for the current block, move to the next block
+                if not current_definition_callouts and definition_block_queue:
+                    current_definition_block, current_definition_callouts = definition_block_queue.pop(0)
+                    definition_index = 0
+
+                # Check if this callout matches the next expected callout for current block
+                if (current_definition_callouts and
+                    definition_index < len(current_definition_callouts) and
+                    local_num == current_definition_callouts[definition_index]):
+                    # Match! Renumber it
+                    global_num = renumber_map[(current_definition_block, local_num)]
+                    new_line = callout_definition_pattern.sub(f'<{global_num}> ', line)
+                    new_lines.append(new_line)
+                    definition_index += 1
+                    # If we've processed all callouts for this block, clear it
+                    if definition_index >= len(current_definition_callouts):
+                        current_definition_callouts = []
+                        current_definition_block = None
+                        definition_index = 0
+                else:
+                    # Doesn't match expected pattern, keep original
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+    fixes_applied = global_callout_number - 1
+    if fixes_applied > 0:
+        LOG.info(f"Renumbered {fixes_applied} callout(s) to be sequential across document")
+
+    return '\n'.join(new_lines)
+
+
+def preprocess_adoc_callouts(content: str) -> str:
+    """Preprocess AsciiDoc to add source designation to blocks with callouts.
+
+    Detects listing blocks (----) that contain callouts (<1>, <2>, etc.)
+    but don't have a [source,...] designation, and adds one.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+
+    Returns:
+        Preprocessed content with source designations added where needed
+    """
+    lines = content.split('\n')
+    new_lines = []
+    i = 0
+    fixes_applied = 0
+    in_block = False
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Check if this is a block delimiter
+        if line.strip() == '----':
+            if not in_block:
+                # This is an opening delimiter
+                in_block = True
+
+                # Look back to see if there's already a [source,...] designation
+                # Check the previous non-empty line
+                has_source_designation = False
+                check_idx = len(new_lines) - 1
+                while check_idx >= 0:
+                    prev_line = new_lines[check_idx].strip()
+                    if prev_line:
+                        if prev_line.startswith('[source') or prev_line.startswith('[listing'):
+                            has_source_designation = True
+                        break
+                    check_idx -= 1
+
+                if not has_source_designation:
+                    # Look ahead to see if block contains callouts
+                    block_lines = []
+                    j = i + 1
+                    has_callouts = False
+                    while j < len(lines) and lines[j].strip() != '----':
+                        block_lines.append(lines[j])
+                        # Check for callout pattern: <digit>
+                        if re.search(r'<\d+>', lines[j]):
+                            has_callouts = True
+                        j += 1
+
+                    if has_callouts:
+                        # Detect the language of the block
+                        language = detect_block_language(block_lines)
+                        new_lines.append(f'[source,{language}]')
+                        fixes_applied += 1
+                        LOG.info(f"Added [source,{language}] for block with callouts at line {i + 1}")
+            else:
+                # This is a closing delimiter
+                in_block = False
+
+        new_lines.append(line)
+        i += 1
+
+    if fixes_applied > 0:
+        LOG.info(f"Fixed {fixes_applied} code block(s) missing source designation")
+
+    return '\n'.join(new_lines)
+
+
 def preprocess_adoc_tables(content: str) -> str:
     """Preprocess AsciiDoc content to fix common table issues.
 
@@ -271,6 +529,61 @@ def preprocess_adoc_tables(content: str) -> str:
         LOG.warning(f"Found unclosed table, closing it")
         table_lines.append('|===')
         new_lines.extend(table_lines)
+
+    return '\n'.join(new_lines)
+
+
+def resolve_adoc_includes(content: str, base_dir: Path, current_file: Path) -> str:
+    """Recursively resolve AsciiDoc include directives.
+
+    Reads and inlines all include:: directives to create a single document
+    that can be preprocessed as a whole.
+
+    Args:
+        content: The AsciiDoc content with include directives
+        base_dir: The base directory for resolving includes
+        current_file: The current file being processed (for relative paths)
+
+    Returns:
+        Content with all includes resolved inline
+    """
+    lines = content.split('\n')
+    new_lines = []
+    include_pattern = re.compile(r'^include::([^\[]+)\[(.*)\]')
+
+    for line in lines:
+        match = include_pattern.match(line)
+        if match:
+            include_path = match.group(1)
+            include_options = match.group(2)
+
+            # Resolve the include path
+            # Try relative to base_dir first
+            resolved_path = base_dir / include_path
+            if not resolved_path.exists():
+                # Try relative to current file
+                resolved_path = current_file.parent / include_path
+
+            if resolved_path.exists():
+                try:
+                    with open(resolved_path, 'r', encoding='utf-8') as f:
+                        included_content = f.read()
+
+                    # Recursively resolve includes in the included file
+                    included_content = resolve_adoc_includes(included_content, base_dir, resolved_path)
+
+                    # Add a comment to track where this content came from
+                    new_lines.append(f'// BEGIN INCLUDE: {include_path}')
+                    new_lines.append(included_content)
+                    new_lines.append(f'// END INCLUDE: {include_path}')
+                except Exception as e:
+                    LOG.warning(f"Failed to read include {include_path}: {e}")
+                    new_lines.append(line)  # Keep original include directive
+            else:
+                LOG.warning(f"Include file not found: {include_path}")
+                new_lines.append(line)  # Keep original include directive
+        else:
+            new_lines.append(line)
 
     return '\n'.join(new_lines)
 
@@ -658,31 +971,82 @@ class DocsConverter:
         try:
             # Find base directory first, as we need it for temp file creation
             base_dir = find_adoc_base_dir(input_path)
+            LOG.info(f"Detected base directory: {base_dir}")
 
-            # Read and preprocess the input file
-            with open(input_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            # Preprocess all .adoc files in the base directory tree
+            # We need to do this because the callouts that need fixing are in included files
+            import shutil
+            temp_base_dir = tempfile.mkdtemp(prefix="adoc_preprocess_")
+            temp_base_path = Path(temp_base_dir)
 
-            preprocessed_content = preprocess_adoc_tables(content)
+            try:
+                # Copy entire base directory to temp, following symlinks
+                LOG.info(f"Copying {base_dir} (following symlinks) to {temp_base_path} for preprocessing...")
 
-            # Create temporary file with preprocessed content in the base directory
-            preprocessed_temp = tempfile.NamedTemporaryFile(
-                mode='w',
-                suffix='.adoc',
-                delete=False,
-                encoding='utf-8',
-                dir=str(base_dir.absolute())
-            )
-            preprocessed_temp.write(preprocessed_content)
-            preprocessed_temp.flush()
-            preprocessed_temp.close()
-            preprocessed_path = Path(preprocessed_temp.name)
+                # Use a custom copy function to preprocess .adoc files
+                adoc_preprocessed = 0
+                files_copied = 0
+
+                def copy_and_preprocess(src, dst):
+                    nonlocal adoc_preprocessed, files_copied
+                    if Path(src).suffix == '.adoc':
+                        with open(src, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        # Apply all preprocessing steps
+                        preprocessed = preprocess_adoc_callout_numbering(content)  # Renumber callouts sequentially
+                        preprocessed = preprocess_adoc_callouts(preprocessed)      # Add [source,...] if missing
+                        preprocessed = preprocess_adoc_tables(preprocessed)        # Fix tables
+                        with open(dst, 'w', encoding='utf-8') as f:
+                            f.write(preprocessed)
+                        adoc_preprocessed += 1
+                    else:
+                        shutil.copy2(src, dst)
+                    files_copied += 1
+                    return dst
+
+                # Copy the tree, following symlinks and preprocessing .adoc files
+                shutil.copytree(
+                    base_dir,
+                    temp_base_path,
+                    copy_function=copy_and_preprocess,
+                    symlinks=False,  # Follow symlinks
+                    dirs_exist_ok=True
+                )
+
+                LOG.info(f"Copied {files_copied} files ({adoc_preprocessed} .adoc files preprocessed)")
+
+                # Now use the preprocessed file
+                preprocessed_path = temp_base_path / input_path.relative_to(base_dir)
+                LOG.info(f"Using preprocessed file: {preprocessed_path}")
+
+            except Exception as e:
+                LOG.error(f"Failed to preprocess directory: {e}")
+                # Fall back to simple preprocessing
+                with open(input_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                preprocessed_content = preprocess_adoc_callouts(content)
+                preprocessed_content = preprocess_adoc_tables(preprocessed_content)
+
+                preprocessed_temp = tempfile.NamedTemporaryFile(
+                    mode='w',
+                    suffix='.adoc',
+                    delete=False,
+                    encoding='utf-8',
+                    dir=str(base_dir.absolute())
+                )
+                preprocessed_temp.write(preprocessed_content)
+                preprocessed_temp.flush()
+                preprocessed_temp.close()
+                preprocessed_path = Path(preprocessed_temp.name)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as xml_temp:
                 xml_temp_path = Path(xml_temp.name)
                 xml_temp.close()
 
                 try:
+                    # Determine which base directory to use
+                    conversion_base_dir = temp_base_path if temp_base_path.exists() else base_dir
+
                     # If attributes file is provided, create a wrapper file with includes
                     # The wrapper file must be in the base directory structure
                     if self.attributes_file:
@@ -691,7 +1055,7 @@ class DocsConverter:
                             suffix=".adoc",
                             delete=False,
                             encoding='utf-8',
-                            dir=str(base_dir.absolute())
+                            dir=str(conversion_base_dir.absolute())
                         )
                         adoc_temp.write(f"include::{self.attributes_file.absolute()}[]\n\ninclude::{preprocessed_path.absolute()}[]\n")
                         adoc_temp.flush()
@@ -706,7 +1070,7 @@ class DocsConverter:
                         "-b", "docbook5",
                         "-d", "book",
                         "-a", "fn-private=pass",
-                        "--base-dir", str(base_dir.absolute()),
+                        "--base-dir", str(conversion_base_dir.absolute()),
                         "-o", str(xml_temp_path.absolute()),
                         str(input_for_conversion.absolute()),
                     ]
@@ -770,11 +1134,17 @@ class DocsConverter:
                         xml_temp_path.unlink()
                     if adoc_temp and Path(adoc_temp.name).exists():
                         Path(adoc_temp.name).unlink()
-                    if preprocessed_temp and preprocessed_path.exists():
-                        preprocessed_path.unlink()
+                    # Clean up temp directory if it was created
+                    if temp_base_path and temp_base_path.exists():
+                        import shutil
+                        shutil.rmtree(temp_base_path, ignore_errors=True)
 
         except Exception as e:
             LOG.error("Failed during preprocessing: %s (%s)", input_path, e)
+            # Clean up temp directory on error too
+            if 'temp_base_path' in locals() and temp_base_path and temp_base_path.exists():
+                import shutil
+                shutil.rmtree(temp_base_path, ignore_errors=True)
             raise
 
 
