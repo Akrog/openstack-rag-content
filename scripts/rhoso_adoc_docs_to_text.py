@@ -155,7 +155,15 @@ def red_hat_docs_path(
         output_dir:
             Directory where the converted .adoc file should be stored.
     """
+    # Directories to skip (backup/old content that shouldn't be processed)
+    skip_dirs = {'gerrit-backup', 'backup', 'old', '.backup', 'archive'}
+
     for file in input_dir.rglob("master.adoc"):
+        # Skip files in backup/old directories
+        if any(part in skip_dirs for part in file.parts):
+            LOG.info(f"Skipping {file} (in backup/excluded directory)")
+            continue
+
         metadata_file_name = "docinfo.xml"
         docinfo = file.parent.joinpath(metadata_file_name)
 
