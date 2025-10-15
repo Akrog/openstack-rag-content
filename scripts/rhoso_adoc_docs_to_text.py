@@ -268,6 +268,37 @@ def preprocess_adoc_tables(content: str) -> str:
     return '\n'.join(new_lines)
 
 
+def find_adoc_base_dir(input_path: Path) -> Path:
+    """Find the base directory for AsciiDoc includes.
+
+    This function walks up the directory tree from the input file to find
+    a suitable base directory that contains common documentation directories
+    like 'assemblies', 'common', 'titles', etc.
+
+    Args:
+        input_path: Path to the input .adoc file
+
+    Returns:
+        The base directory path for resolving includes
+    """
+    current = input_path.parent
+
+    # Walk up the directory tree looking for common doc directories
+    for _ in range(5):  # Limit search depth to avoid going too far up
+        # Check if this directory contains typical doc structure markers
+        if any((current / marker).exists() for marker in ['assemblies', 'common', 'titles', 'acorns', 'manual-content']):
+            return current
+
+        # Move up one directory
+        if current.parent == current:  # Reached root
+            break
+        current = current.parent
+
+    # If we didn't find a suitable base directory, use the input file's parent
+    # (this is the fallback for simple cases)
+    return input_path.parent
+
+
 def preprocess_xml_list_titles(xml_content: str) -> str:
     """Preprocess XML to convert list titles to formalpara elements.
 
@@ -377,10 +408,12 @@ class RelNotesConverter:
                     input_for_conversion = input_path
 
                 # Step 1: Convert AsciiDoc to DocBook5 XML
+                base_dir = find_adoc_base_dir(input_path)
                 asciidoctor_cmd = [
                     "asciidoctor",
                     "-b", "docbook5",
                     "-a", "fn-private=pass",
+                    "--base-dir", str(base_dir.absolute()),
                     "-o", str(xml_temp_path.absolute()),
                     str(input_for_conversion.absolute()),
                 ]
@@ -479,10 +512,12 @@ class DocsConverter:
                         input_for_conversion = preprocessed_path
 
                     # Step 1: Convert AsciiDoc to DocBook5 XML
+                    base_dir = find_adoc_base_dir(input_path)
                     asciidoctor_cmd = [
                         "asciidoctor",
                         "-b", "docbook5",
                         "-a", "fn-private=pass",
+                        "--base-dir", str(base_dir.absolute()),
                         "-o", str(xml_temp_path.absolute()),
                         str(input_for_conversion.absolute()),
                     ]
