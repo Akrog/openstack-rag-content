@@ -498,12 +498,22 @@ def preprocess_adoc_callouts(content: str, file_path: Path = None) -> tuple[str,
                 # Look back to see if there's already a [source,...] designation
                 # Check the previous non-empty line
                 has_source_designation = False
+                has_subs_only = False
+                subs_value = None
                 check_idx = len(new_lines) - 1
+                prev_line_idx = -1
                 while check_idx >= 0:
                     prev_line = new_lines[check_idx].strip()
                     if prev_line:
                         if prev_line.startswith('[source') or prev_line.startswith('[listing'):
                             has_source_designation = True
+                        elif prev_line.startswith('[subs='):
+                            # Extract the subs value
+                            match = re.match(r'\[subs=([^\]]+)\]', prev_line)
+                            if match:
+                                subs_value = match.group(1)
+                                has_subs_only = True
+                                prev_line_idx = check_idx
                         break
                     check_idx -= 1
 
@@ -522,8 +532,14 @@ def preprocess_adoc_callouts(content: str, file_path: Path = None) -> tuple[str,
                     if has_callouts:
                         # Detect the language of the block
                         language = detect_block_language(block_lines)
-                        new_lines.append(f'[source,{language}]')
-                        fixes.append(f"Line {i + 1}: Added [source,{language}] for block with callouts")
+                        if has_subs_only and subs_value:
+                            # Replace the existing [subs=...] line with [source,language,subs=...]
+                            new_lines[prev_line_idx] = f'[source,{language},subs={subs_value}]'
+                            fixes.append(f"Line {i + 1}: Added source designation to [subs={subs_value}] for block with callouts")
+                        else:
+                            # Add new [source,language] line
+                            new_lines.append(f'[source,{language}]')
+                            fixes.append(f"Line {i + 1}: Added [source,{language}] for block with callouts")
             else:
                 # This is a closing delimiter
                 in_block = False
