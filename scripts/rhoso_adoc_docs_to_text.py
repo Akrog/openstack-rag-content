@@ -1351,6 +1351,111 @@ def preprocess_xml_undefined_entities(xml_content: str) -> str:
     return xml_content
 
 
+def convert_html_tables_to_markdown(markdown_content: str) -> str:
+    """Convert HTML tables in markdown to pipe tables.
+
+    Pandoc sometimes outputs HTML tables for very large or complex tables.
+    This function converts those HTML tables to markdown pipe tables.
+
+    Args:
+        markdown_content: Markdown content that may contain HTML tables
+
+    Returns:
+        Markdown content with HTML tables converted to pipe tables
+    """
+    import re
+    from html.parser import HTMLParser
+
+    class TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = False
+            self.in_thead = False
+            self.in_tbody = False
+            self.in_row = False
+            self.in_cell = False
+            self.current_cell = []
+            self.current_row = []
+            self.headers = []
+            self.rows = []
+            self.table_start = -1
+            self.table_end = -1
+
+        def handle_starttag(self, tag, attrs):
+            if tag == 'table':
+                self.in_table = True
+                self.headers = []
+                self.rows = []
+            elif tag == 'thead':
+                self.in_thead = True
+            elif tag == 'tbody':
+                self.in_tbody = True
+            elif tag == 'tr':
+                self.in_row = True
+                self.current_row = []
+            elif tag in ('th', 'td'):
+                self.in_cell = True
+                self.current_cell = []
+
+        def handle_endtag(self, tag):
+            if tag == 'table':
+                self.in_table = False
+            elif tag == 'thead':
+                self.in_thead = False
+            elif tag == 'tbody':
+                self.in_tbody = False
+            elif tag == 'tr':
+                self.in_row = False
+                if self.in_thead:
+                    self.headers.append(self.current_row[:])
+                elif self.in_tbody:
+                    self.rows.append(self.current_row[:])
+                self.current_row = []
+            elif tag in ('th', 'td'):
+                self.in_cell = False
+                cell_text = ' '.join(self.current_cell).strip()
+                self.current_row.append(cell_text)
+                self.current_cell = []
+
+        def handle_data(self, data):
+            if self.in_cell:
+                self.current_cell.append(data.strip())
+
+    # Find all HTML tables
+    table_pattern = re.compile(r'<table>.*?</table>', re.DOTALL | re.IGNORECASE)
+
+    def replace_table(match):
+        html_table = match.group(0)
+        parser = TableParser()
+        try:
+            parser.feed(html_table)
+
+            if not parser.headers and not parser.rows:
+                return html_table  # Could not parse, keep original
+
+            # Build markdown table
+            md_lines = []
+
+            # Headers
+            if parser.headers:
+                for header_row in parser.headers:
+                    md_lines.append('| ' + ' | '.join(header_row) + ' |')
+                    # Separator row
+                    md_lines.append('|' + '|'.join(['---' for _ in header_row]) + '|')
+
+            # Body rows
+            for row in parser.rows:
+                md_lines.append('| ' + ' | '.join(row) + ' |')
+
+            return '\n'.join(md_lines)
+        except Exception as e:
+            LOG.warning(f"Failed to convert HTML table to markdown: {e}")
+            return html_table  # Keep original on error
+
+    result = table_pattern.sub(replace_table, markdown_content)
+    return result
+
+
 def preprocess_xml_table_cells(xml_content: str) -> str:
     """Flatten table cell content to inline elements for pipe table compatibility.
 
@@ -1585,7 +1690,16 @@ class RelNotesConverter:
                 ]
                 subprocess.run(pandoc_cmd, check=True, capture_output=True)
 
-                # Step 3: Compact pipe tables by removing extra spaces before pipes
+                # Step 3: Convert any HTML tables to markdown pipe tables
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    markdown_content = f.read()
+
+                markdown_content = convert_html_tables_to_markdown(markdown_content)
+
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+
+                # Step 4: Compact pipe tables by removing extra spaces before pipes
                 compact_cmd = [
                     'sed', '-i', '-E',
                     's/ +\\|/ |/g',
@@ -1751,7 +1865,16 @@ class DocsConverter:
                     ]
                     subprocess.run(pandoc_cmd, check=True, capture_output=True, text=True)
 
-                    # Step 3: Compact pipe tables by removing extra spaces before pipes
+                    # Step 3: Convert any HTML tables to markdown pipe tables
+                    with open(output_path, 'r', encoding='utf-8') as f:
+                        markdown_content = f.read()
+
+                    markdown_content = convert_html_tables_to_markdown(markdown_content)
+
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write(markdown_content)
+
+                    # Step 4: Compact pipe tables by removing extra spaces before pipes
                     compact_cmd = [
                         'sed', '-i', '-E',
                         's/ +\\|/ |/g',
