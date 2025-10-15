@@ -1225,6 +1225,55 @@ def fix_xml_nesting_issues(xml_content: str) -> str:
     return result
 
 
+def preprocess_xml_escape_angle_brackets(xml_content: str) -> str:
+    """Escape unescaped angle brackets in XML content that aren't valid XML tags.
+
+    This fixes cases where asciidoctor generates XML with literal angle brackets
+    in text content (e.g., from pass:[] macros with backticks containing <key=value>).
+
+    Args:
+        xml_content: The DocBook XML content as a string
+
+    Returns:
+        XML content with angle brackets properly escaped
+    """
+    fixes_applied = 0
+
+    # Pattern to match placeholder-style angle brackets like <key=value> or <instance>
+    # These appear in code examples and should be escaped
+    # We specifically look for patterns that:
+    # 1. Have = without proper attribute syntax (no space before =, or no quotes)
+    # 2. Are simple words that look like placeholders
+
+    def escape_invalid_tags(match):
+        nonlocal fixes_applied
+        tag_content = match.group(1)
+
+        # Check if this looks like a placeholder rather than a real XML tag
+        # Indicators of placeholders:
+        # - Contains = with no space before it and no proper attribute syntax
+        # - Pattern: word=word (like key=value)
+        if re.match(r'^[a-zA-Z_][\w-]*=[^\s>]+$', tag_content):
+            # This looks like <key=value> style placeholder
+            fixes_applied += 1
+            return f'&lt;{tag_content}&gt;'
+
+        return match.group(0)
+
+    # Find angle bracket pairs and check if they're placeholders
+    # This pattern finds <...> but excludes:
+    # - XML declarations <?...?>
+    # - Closing tags </...>
+    # - Self-closing tags <.../>
+    # - Processing instructions
+    result = re.sub(r'<([a-zA-Z_][\w-]*(?:=[\w-]+)?(?:\[[\w=\s\[\]<>-]*\])?)>', escape_invalid_tags, xml_content)
+
+    if fixes_applied > 0:
+        LOG.info(f"Escaped {fixes_applied} invalid XML angle bracket(s)")
+
+    return result
+
+
 def preprocess_xml_list_titles(xml_content: str) -> str:
     """Preprocess XML to convert list titles to formalpara elements.
 
@@ -1525,13 +1574,17 @@ class DocsConverter:
                     if result.stderr:
                         LOG.warning("asciidoctor warnings for %s:\n%s", input_path, result.stderr)
 
-                    # Step 1.5: Preprocess XML to convert list titles to formalpara
+                    # Step 1.5: Preprocess XML to fix issues
                     # Note: We no longer need fix_xml_nesting_with_parser because we fixed
                     # the source .adoc files with preprocess_adoc_link_brackets
                     with open(xml_temp_path, 'r', encoding='utf-8') as f:
                         xml_content = f.read()
 
-                    preprocessed_xml = preprocess_xml_list_titles(xml_content)
+                    # First escape any invalid angle brackets (like <key=value>)
+                    preprocessed_xml = preprocess_xml_escape_angle_brackets(xml_content)
+
+                    # Then convert list titles to formalpara
+                    preprocessed_xml = preprocess_xml_list_titles(preprocessed_xml)
 
                     with open(xml_temp_path, 'w', encoding='utf-8') as f:
                         f.write(preprocessed_xml)
