@@ -450,12 +450,14 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
             else:
                 new_lines.append(line)
 
-    total_callouts = len(renumber_map)
+    # Check if content actually changed
+    new_content = '\n'.join(new_lines)
     fixes = []
-    if total_callouts > 0:
+    if new_content != content:
+        total_callouts = len(renumber_map)
         fixes.append(f"Renumbered {total_callouts} callout(s) with block-level scoping")
 
-    return '\n'.join(new_lines), fixes
+    return new_content, fixes
 
 
 def preprocess_adoc_callout_placement(content: str, file_path: Path = None) -> tuple[str, list[str]]:
