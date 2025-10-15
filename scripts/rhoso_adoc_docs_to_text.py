@@ -1351,6 +1351,51 @@ def preprocess_xml_undefined_entities(xml_content: str) -> str:
     return xml_content
 
 
+def preprocess_xml_table_cells(xml_content: str) -> str:
+    """Flatten table cell content to inline elements for pipe table compatibility.
+
+    Pandoc can only convert tables to pipe tables if cells contain inline content,
+    not block-level elements like <simpara>. This function flattens table cells
+    by replacing <simpara><literal>text</literal></simpara> with just the text content.
+
+    Args:
+        xml_content: The DocBook XML content as a string
+
+    Returns:
+        Preprocessed XML with flattened table cells
+    """
+    import re
+
+    # Pattern to match <entry> elements with <simpara> children
+    # We want to unwrap the simpara and keep just the inline content
+    # Pattern: <entry ...><simpara>CONTENT</simpara></entry>
+    # Replace with: <entry ...>CONTENT</entry>
+
+    def flatten_cell(match):
+        entry_open = match.group(1)
+        cell_content = match.group(2)
+        entry_close = match.group(3)
+
+        # Remove simpara/para tags but keep the content
+        # Remove opening tags
+        cell_content = re.sub(r'<(?:ns\d+:)?(?:simpara|para)>', '', cell_content)
+        # Remove closing tags
+        cell_content = re.sub(r'</(?:ns\d+:)?(?:simpara|para)>', ' ', cell_content)
+
+        # Clean up multiple spaces
+        cell_content = re.sub(r'\s+', ' ', cell_content).strip()
+
+        return f'{entry_open}{cell_content}{entry_close}'
+
+    # Match entry elements with simpara/para content
+    # This regex handles multi-line content and namespace prefixes
+    pattern = r'(<(?:ns\d+:)?entry[^>]*>)\s*<(?:ns\d+:)?(?:simpara|para)>(.*?)</(?:ns\d+:)?(?:simpara|para)>\s*(</(?:ns\d+:)?entry>)'
+
+    xml_content = re.sub(pattern, flatten_cell, xml_content, flags=re.DOTALL)
+
+    return xml_content
+
+
 def preprocess_xml_list_titles(xml_content: str) -> str:
     """Preprocess XML to convert list titles to formalpara elements.
 
@@ -1521,6 +1566,9 @@ class RelNotesConverter:
                 # Replace undefined XML entities
                 preprocessed_xml = preprocess_xml_undefined_entities(xml_content)
 
+                # Flatten table cells to inline content for pipe table compatibility
+                preprocessed_xml = preprocess_xml_table_cells(preprocessed_xml)
+
                 with open(xml_temp_path, 'w', encoding='utf-8') as f:
                     f.write(preprocessed_xml)
 
@@ -1529,7 +1577,7 @@ class RelNotesConverter:
                     "pandoc",
                     "-f", "docbook",
                     "--wrap=preserve",
-                    "-t", "markdown_strict",
+                    "-t", "markdown-simple_tables-multiline_tables-grid_tables+pipe_tables",
                     f"--filter={self.PANDOC_FILTER_PATH}",
                     f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
                     str(xml_temp_path.absolute()),
@@ -1673,6 +1721,9 @@ class DocsConverter:
                     # Replace undefined XML entities before parsing
                     preprocessed_xml = preprocess_xml_undefined_entities(preprocessed_xml)
 
+                    # Flatten table cells to inline content for pipe table compatibility
+                    preprocessed_xml = preprocess_xml_table_cells(preprocessed_xml)
+
                     # Then convert list titles to formalpara
                     preprocessed_xml = preprocess_xml_list_titles(preprocessed_xml)
 
@@ -1684,7 +1735,7 @@ class DocsConverter:
                         "pandoc",
                         "-f", "docbook",
                         "--wrap=preserve",
-                        "-t", "markdown_strict",
+                        "-t", "markdown-simple_tables-multiline_tables-grid_tables+pipe_tables",
                         f"--filter={self.PANDOC_FILTER_PATH}",
                         f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
                         str(xml_temp_path.absolute()),
