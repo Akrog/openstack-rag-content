@@ -397,18 +397,25 @@ class RelNotesConverter:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml") as xml_temp:
             try:
                 xml_temp_path = Path(xml_temp.name)
+                base_dir = find_adoc_base_dir(input_path)
 
                 # If attributes file is provided, create a wrapper file with includes
+                # The wrapper file must be in the base directory structure, not /tmp/
                 if self.attributes_file:
-                    adoc_temp = tempfile.NamedTemporaryFile(mode="w", suffix=".adoc")
+                    adoc_temp = tempfile.NamedTemporaryFile(
+                        mode="w",
+                        suffix=".adoc",
+                        dir=str(base_dir.absolute()),
+                        delete=False
+                    )
                     adoc_temp.write(f"include::{self.attributes_file.absolute()}[]\n\ninclude::{input_path.absolute()}[]\n")
                     adoc_temp.flush()
+                    adoc_temp.close()
                     input_for_conversion = Path(adoc_temp.name)
                 else:
                     input_for_conversion = input_path
 
                 # Step 1: Convert AsciiDoc to DocBook5 XML
-                base_dir = find_adoc_base_dir(input_path)
                 asciidoctor_cmd = [
                     "asciidoctor",
                     "-b", "docbook5",
@@ -440,8 +447,8 @@ class RelNotesConverter:
 
             finally:
                 # Clean up temporary files
-                if adoc_temp:
-                    adoc_temp.close()
+                if adoc_temp and Path(adoc_temp.name).exists():
+                    Path(adoc_temp.name).unlink()
 
 
 class DocsConverter:
@@ -483,14 +490,23 @@ class DocsConverter:
         adoc_temp = None
         preprocessed_temp = None
         try:
+            # Find base directory first, as we need it for temp file creation
+            base_dir = find_adoc_base_dir(input_path)
+
             # Read and preprocess the input file
             with open(input_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             preprocessed_content = preprocess_adoc_tables(content)
 
-            # Create temporary file with preprocessed content
-            preprocessed_temp = tempfile.NamedTemporaryFile(mode='w', suffix='.adoc', delete=False, encoding='utf-8')
+            # Create temporary file with preprocessed content in the base directory
+            preprocessed_temp = tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.adoc',
+                delete=False,
+                encoding='utf-8',
+                dir=str(base_dir.absolute())
+            )
             preprocessed_temp.write(preprocessed_content)
             preprocessed_temp.flush()
             preprocessed_temp.close()
@@ -502,8 +518,15 @@ class DocsConverter:
 
                 try:
                     # If attributes file is provided, create a wrapper file with includes
+                    # The wrapper file must be in the base directory structure
                     if self.attributes_file:
-                        adoc_temp = tempfile.NamedTemporaryFile(mode="w", suffix=".adoc", delete=False, encoding='utf-8')
+                        adoc_temp = tempfile.NamedTemporaryFile(
+                            mode="w",
+                            suffix=".adoc",
+                            delete=False,
+                            encoding='utf-8',
+                            dir=str(base_dir.absolute())
+                        )
                         adoc_temp.write(f"include::{self.attributes_file.absolute()}[]\n\ninclude::{preprocessed_path.absolute()}[]\n")
                         adoc_temp.flush()
                         adoc_temp.close()
@@ -512,7 +535,6 @@ class DocsConverter:
                         input_for_conversion = preprocessed_path
 
                     # Step 1: Convert AsciiDoc to DocBook5 XML
-                    base_dir = find_adoc_base_dir(input_path)
                     asciidoctor_cmd = [
                         "asciidoctor",
                         "-b", "docbook5",
