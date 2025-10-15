@@ -296,29 +296,87 @@ def detect_block_language(block_lines: list[str]) -> str:
     return 'yaml'
 
 
-def preprocess_adoc_callout_numbering(content: str) -> str:
-    """Renumber callouts to be sequential across the entire document.
+def preprocess_adoc_link_brackets(content: str, file_path: Path = None) -> tuple[str, list[str]]:
+    """Fix link text containing square brackets using pass macro.
 
-    AsciiDoctor expects callouts to be numbered sequentially across the entire
-    document, not restarting at <1> for each code block. This function finds
-    all callouts and renumbers them globally.
+    When link text contains square brackets like link:url[text[with]brackets],
+    asciidoctor can misinterpret the brackets. This fixes it by wrapping the
+    text portion with pass:[] macro: link:url[pass:[text[with]brackets]]
 
     Args:
         content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
 
     Returns:
-        Content with callouts renumbered sequentially
+        Tuple of (fixed_content, list of fix descriptions)
+    """
+    lines = content.split('\n')
+    new_lines = []
+    fixes = []
+
+    # Pattern to match links with square brackets in the text portion
+    # link:url[text] where text contains [ or ]
+    link_pattern = re.compile(r'(link:[^\[]+\[)([^\]]*[\[\]][^\]]*?)(\])')
+
+    for i, line in enumerate(lines):
+        new_line = line
+        line_fixes = []
+
+        for match in link_pattern.finditer(line):
+            link_prefix = match.group(1)
+            link_text = match.group(2)
+            link_suffix = match.group(3)
+
+            # Check if text contains brackets and is not already wrapped with pass:
+            if ('[' in link_text or ']' in link_text) and not link_text.startswith('pass:['):
+                # Wrap the text with pass:[]
+                new_link = f"{link_prefix}pass:[{link_text}]{link_suffix}"
+                new_line = new_line.replace(match.group(0), new_link, 1)
+                line_fixes.append(f"Line {i+1}: wrapped link text '{link_text}' with pass:[]")
+
+        if line_fixes:
+            fixes.extend(line_fixes)
+            new_lines.append(new_line)
+        else:
+            new_lines.append(line)
+
+    result = '\n'.join(new_lines)
+    return result, fixes
+
+
+def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> tuple[str, list[str]]:
+    """Renumber callouts to be sequential within each list item scope.
+
+    AsciiDoctor expects callouts to be numbered sequentially within their scope.
+    When callouts appear within list items (like procedure steps), they should
+    restart at <1> for each list item. Otherwise, they're numbered globally.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
+
+    Returns:
+        Tuple of (fixed_content, list of fix descriptions)
     """
     lines = content.split('\n')
     global_callout_number = 1
     renumber_map = {}  # Maps (block_index, local_number) -> global_number
-    block_callouts = []  # List of (block_index, [local_numbers_in_order])
+    block_callouts = []  # List of (block_index, list_item_num, [local_numbers_in_order])
     block_index = 0
     in_block = False
     current_block_callouts = []
+    current_list_item = 0
+
+    # Pattern to detect list items (numbered or bulleted)
+    list_item_pattern = re.compile(r'^(\.|\.{2,}|\*|\*{2,})\s+')
 
     # First pass: identify all callouts in blocks and build renumber map
     for i, line in enumerate(lines):
+        # Check if this is a new list item (resets callout numbering)
+        if list_item_pattern.match(line):
+            current_list_item += 1
+            global_callout_number = 1  # Reset numbering for new list item
+
         if line.strip() == '----':
             if not in_block:
                 in_block = True
@@ -327,7 +385,7 @@ def preprocess_adoc_callout_numbering(content: str) -> str:
             else:
                 in_block = False
                 if current_block_callouts:
-                    block_callouts.append((block_index, list(current_block_callouts)))
+                    block_callouts.append((block_index, current_list_item, list(current_block_callouts)))
         elif in_block:
             # Find callouts in this line
             for match in re.finditer(r'<(\d+)>', line):
@@ -339,7 +397,7 @@ def preprocess_adoc_callout_numbering(content: str) -> str:
 
     if not renumber_map:
         # No callouts to renumber
-        return content
+        return content, []
 
     # Second pass: apply renumbering to both block callouts and callout definitions
     new_lines = []
@@ -347,7 +405,7 @@ def preprocess_adoc_callout_numbering(content: str) -> str:
     block_index = 0
     callout_definition_pattern = re.compile(r'^<(\d+)>\s+')
     # Track which block we're processing definitions for
-    definition_block_queue = list(block_callouts)  # Queue of (block_index, [local_nums])
+    definition_block_queue = list(block_callouts)  # Queue of (block_index, list_item, [local_nums])
     current_definition_block = None
     current_definition_callouts = []
     definition_index = 0
@@ -378,7 +436,7 @@ def preprocess_adoc_callout_numbering(content: str) -> str:
                 # If we haven't set up the current definition block yet, or we've
                 # processed all callouts for the current block, move to the next block
                 if not current_definition_callouts and definition_block_queue:
-                    current_definition_block, current_definition_callouts = definition_block_queue.pop(0)
+                    current_definition_block, _, current_definition_callouts = definition_block_queue.pop(0)
                     definition_index = 0
 
                 # Check if this callout matches the next expected callout for current block
@@ -401,14 +459,15 @@ def preprocess_adoc_callout_numbering(content: str) -> str:
             else:
                 new_lines.append(line)
 
-    fixes_applied = global_callout_number - 1
-    if fixes_applied > 0:
-        LOG.info(f"Renumbered {fixes_applied} callout(s) to be sequential across document")
+    total_callouts = len(renumber_map)
+    fixes = []
+    if total_callouts > 0:
+        fixes.append(f"Renumbered {total_callouts} callout(s) with proper scoping")
 
-    return '\n'.join(new_lines)
+    return '\n'.join(new_lines), fixes
 
 
-def preprocess_adoc_callouts(content: str) -> str:
+def preprocess_adoc_callouts(content: str, file_path: Path = None) -> tuple[str, list[str]]:
     """Preprocess AsciiDoc to add source designation to blocks with callouts.
 
     Detects listing blocks (----) that contain callouts (<1>, <2>, etc.)
@@ -416,14 +475,15 @@ def preprocess_adoc_callouts(content: str) -> str:
 
     Args:
         content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
 
     Returns:
-        Preprocessed content with source designations added where needed
+        Tuple of (fixed_content, list of fix descriptions)
     """
     lines = content.split('\n')
     new_lines = []
     i = 0
-    fixes_applied = 0
+    fixes = []
     in_block = False
 
     while i < len(lines):
@@ -463,8 +523,7 @@ def preprocess_adoc_callouts(content: str) -> str:
                         # Detect the language of the block
                         language = detect_block_language(block_lines)
                         new_lines.append(f'[source,{language}]')
-                        fixes_applied += 1
-                        LOG.info(f"Added [source,{language}] for block with callouts at line {i + 1}")
+                        fixes.append(f"Line {i + 1}: Added [source,{language}] for block with callouts")
             else:
                 # This is a closing delimiter
                 in_block = False
@@ -472,26 +531,25 @@ def preprocess_adoc_callouts(content: str) -> str:
         new_lines.append(line)
         i += 1
 
-    if fixes_applied > 0:
-        LOG.info(f"Fixed {fixes_applied} code block(s) missing source designation")
-
-    return '\n'.join(new_lines)
+    return '\n'.join(new_lines), fixes
 
 
-def preprocess_adoc_tables(content: str) -> str:
+def preprocess_adoc_tables(content: str, file_path: Path = None) -> tuple[str, list[str]]:
     """Preprocess AsciiDoc content to fix common table issues.
 
     Args:
         content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
 
     Returns:
-        Preprocessed content with table issues fixed
+        Tuple of (fixed_content, list of fix descriptions)
     """
     lines = content.split('\n')
     new_lines = []
     in_table = False
     table_start_idx = -1
     table_lines = []
+    fixes = []
 
     for i, line in enumerate(lines):
         # Detect table start
@@ -512,7 +570,7 @@ def preprocess_adoc_tables(content: str) -> str:
 
                 if len(body_rows) == 0:
                     # Empty table - add a placeholder row
-                    LOG.warning(f"Found empty table at line {table_start_idx}, adding placeholder row")
+                    fixes.append(f"Line {table_start_idx}: Added placeholder row to empty table")
                     # Insert a placeholder row before the closing |===
                     table_lines.insert(-1, '| N/A | N/A')
 
@@ -526,11 +584,131 @@ def preprocess_adoc_tables(content: str) -> str:
 
     # Handle case where table wasn't closed
     if in_table and table_lines:
-        LOG.warning(f"Found unclosed table, closing it")
+        fixes.append(f"Line {table_start_idx}: Closed unclosed table")
         table_lines.append('|===')
         new_lines.extend(table_lines)
 
-    return '\n'.join(new_lines)
+    return '\n'.join(new_lines), fixes
+
+
+def fix_adoc_file(file_path: Path) -> list[str]:
+    """Apply all AsciiDoc fixes to a source file and report changes.
+
+    This function reads an .adoc file, applies all preprocessing fixes,
+    writes the changes back to the file if any fixes were made, and
+    returns a list of descriptions of what was fixed.
+
+    Args:
+        file_path: Path to the .adoc file to fix
+
+    Returns:
+        List of fix descriptions (empty if no fixes were needed)
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            original_content = f.read()
+    except Exception as e:
+        LOG.error(f"Failed to read {file_path}: {e}")
+        return []
+
+    content = original_content
+    all_fixes = []
+
+    # Apply all preprocessing steps
+    content, fixes = preprocess_adoc_link_brackets(content, file_path)
+    all_fixes.extend(fixes)
+
+    content, fixes = preprocess_adoc_callout_numbering(content, file_path)
+    all_fixes.extend(fixes)
+
+    content, fixes = preprocess_adoc_callouts(content, file_path)
+    all_fixes.extend(fixes)
+
+    content, fixes = preprocess_adoc_tables(content, file_path)
+    all_fixes.extend(fixes)
+
+    # Only write back if changes were made
+    if content != original_content:
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            LOG.info(f"Fixed {file_path}: {len(all_fixes)} issue(s)")
+        except Exception as e:
+            LOG.error(f"Failed to write fixes to {file_path}: {e}")
+            return []
+
+    return all_fixes
+
+
+def fix_adoc_files_in_directory(base_dir: Path) -> dict[Path, list[str]]:
+    """Fix all .adoc files in a directory tree.
+
+    Args:
+        base_dir: Base directory to search for .adoc files
+
+    Returns:
+        Dictionary mapping file paths to lists of fix descriptions.
+        Only includes files that had fixes applied.
+    """
+    fixes_by_file = {}
+
+    for adoc_file in base_dir.rglob('*.adoc'):
+        fixes = fix_adoc_file(adoc_file)
+        if fixes:
+            fixes_by_file[adoc_file] = fixes
+
+    return fixes_by_file
+
+
+def find_included_files(input_file: Path, base_dir: Path) -> set[Path]:
+    """Recursively find all files included by an AsciiDoc file.
+
+    Args:
+        input_file: The main AsciiDoc file to analyze
+        base_dir: The base directory for resolving relative includes
+
+    Returns:
+        Set of Path objects for all included files (recursively)
+    """
+    included_files = set()
+    files_to_process = [input_file]
+    processed_files = set()
+
+    include_pattern = re.compile(r'^include::([^\[]+)\[')
+
+    while files_to_process:
+        current_file = files_to_process.pop()
+
+        # Skip if already processed
+        if current_file in processed_files:
+            continue
+
+        processed_files.add(current_file)
+
+        # Read the file and find includes
+        try:
+            with open(current_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            for line in content.split('\n'):
+                match = include_pattern.match(line)
+                if match:
+                    include_path = match.group(1)
+
+                    # Resolve the include path
+                    # Try relative to base_dir first
+                    resolved_path = base_dir / include_path
+                    if not resolved_path.exists():
+                        # Try relative to current file
+                        resolved_path = current_file.parent / include_path
+
+                    if resolved_path.exists():
+                        included_files.add(resolved_path)
+                        files_to_process.append(resolved_path)
+        except Exception as e:
+            LOG.warning(f"Failed to process includes in {current_file}: {e}")
+
+    return included_files
 
 
 def resolve_adoc_includes(content: str, base_dir: Path, current_file: Path) -> str:
@@ -620,7 +798,11 @@ def find_adoc_base_dir(input_path: Path) -> Path:
 
 
 def fix_xml_nesting_with_parser(xml_content: str) -> str:
-    """Fix XML nesting issues using regex to find and repair malformed patterns.
+    """DEPRECATED: Fix XML nesting issues using regex to find and repair malformed patterns.
+
+    This function is deprecated. Instead, fix the source AsciiDoc files using
+    preprocess_adoc_link_brackets() which wraps link text containing square brackets
+    with the pass:[] macro.
 
     This function specifically targets the pattern where link and literal tags
     are improperly nested due to square brackets in AsciiDoc source:
@@ -679,7 +861,11 @@ def fix_xml_nesting_with_parser(xml_content: str) -> str:
 
 
 def fix_xml_nesting_issues(xml_content: str) -> str:
-    """Fix common XML nesting issues in DocBook.
+    """DEPRECATED: Fix common XML nesting issues in DocBook.
+
+    This function is deprecated. Instead, fix the source AsciiDoc files using
+    preprocess_adoc_link_brackets() which wraps link text containing square brackets
+    with the pass:[] macro.
 
     This function fixes malformed nested inline elements that can occur when
     asciidoctor converts AsciiDoc to DocBook. Common issues include:
@@ -781,9 +967,9 @@ def fix_xml_nesting_issues(xml_content: str) -> str:
 def preprocess_xml_list_titles(xml_content: str) -> str:
     """Preprocess XML to convert list titles to formalpara elements.
 
-    Pandoc doesn't preserve <itemizedlist><title> or <orderedlist><title> elements
-    when converting from DocBook. This function converts them to <formalpara><title>
-    elements which pandoc does convert to Div.formalpara-title.
+    NOTE: This XML preprocessing is still needed as there's no simple AsciiDoc
+    fix for this issue. Pandoc doesn't preserve <itemizedlist><title> or
+    <orderedlist><title> elements when converting from DocBook.
 
     Args:
         xml_content: The DocBook XML content as a string
@@ -846,16 +1032,21 @@ class RelNotesConverter:
     def __init__(self, attributes_file: Path | None = None):
         self.attributes_file = attributes_file
 
-    def convert(self, input_path: Path, output_path: Path) -> None:
+    def convert(self, input_path: Path, output_path: Path) -> dict[Path, list[str]]:
         """Convert release notes from AsciiDoc to Markdown.
 
-        This method uses a two-step conversion process:
-        1. Convert AsciiDoc to DocBook5 XML using asciidoctor
-        2. Convert DocBook5 XML to Markdown using pandoc with a custom filter
+        This method uses a multi-step conversion process:
+        1. Fix all AsciiDoc source files in the base directory
+        2. Convert AsciiDoc to DocBook5 XML using asciidoctor
+        3. Convert DocBook5 XML to Markdown using pandoc with a custom filter
 
         Args:
             input_path: Path to input .adoc file
             output_path: Path to output .txt (markdown) file
+
+        Returns:
+            Dictionary mapping file paths to lists of fix descriptions.
+            Only includes files that had fixes applied.
 
         Raises:
             subprocess.CalledProcessError: If asciidoctor or pandoc command fails
@@ -871,12 +1062,43 @@ class RelNotesConverter:
                 output_path,
             )
 
+        # Find base directory
+        base_dir = find_adoc_base_dir(input_path)
+        LOG.info(f"Detected base directory: {base_dir}")
+
+        # Fix all .adoc files in the base directory
+        LOG.info(f"Fixing .adoc files in {base_dir}...")
+        fixes_by_file = fix_adoc_files_in_directory(base_dir)
+
+        # Also fix all included files (even if outside base_dir)
+        LOG.info(f"Finding and fixing included files...")
+        included_files = find_included_files(input_path, base_dir)
+        for included_file in included_files:
+            # Skip files already fixed in base_dir
+            if included_file not in fixes_by_file:
+                fixes = fix_adoc_file(included_file)
+                if fixes:
+                    fixes_by_file[included_file] = fixes
+
+        if fixes_by_file:
+            LOG.info(f"Fixed {len(fixes_by_file)} file(s) with issues")
+            for file_path, fixes in fixes_by_file.items():
+                try:
+                    rel_path = file_path.relative_to(base_dir)
+                except ValueError:
+                    # File is outside base_dir, show full path
+                    rel_path = file_path
+                LOG.info(f"  {rel_path}:")
+                for fix in fixes:
+                    LOG.info(f"    - {fix}")
+        else:
+            LOG.info("No fixes needed in source files")
+
         # Create temporary files for the conversion process
         adoc_temp = None
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml") as xml_temp:
             try:
                 xml_temp_path = Path(xml_temp.name)
-                base_dir = find_adoc_base_dir(input_path)
 
                 # If attributes file is provided, create a wrapper file with includes
                 # The wrapper file must be in the base directory structure, not /tmp/
@@ -973,80 +1195,44 @@ class DocsConverter:
             base_dir = find_adoc_base_dir(input_path)
             LOG.info(f"Detected base directory: {base_dir}")
 
-            # Preprocess all .adoc files in the base directory tree
-            # We need to do this because the callouts that need fixing are in included files
-            import shutil
-            temp_base_dir = tempfile.mkdtemp(prefix="adoc_preprocess_")
-            temp_base_path = Path(temp_base_dir)
+            # Fix all included files (recursively)
+            LOG.info(f"Finding and fixing included files...")
+            included_files = find_included_files(input_path, base_dir)
+            if included_files:
+                LOG.info(f"Found {len(included_files)} included file(s), fixing...")
+                for included_file in included_files:
+                    fixes = fix_adoc_file(included_file)
+                    if fixes:
+                        LOG.info(f"  Fixed {included_file}: {len(fixes)} issue(s)")
+                        for fix in fixes:
+                            LOG.debug(f"    - {fix}")
+            else:
+                LOG.info("No included files found")
 
-            try:
-                # Copy entire base directory to temp, following symlinks
-                LOG.info(f"Copying {base_dir} (following symlinks) to {temp_base_path} for preprocessing...")
+            # Read and preprocess the input file
+            with open(input_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-                # Use a custom copy function to preprocess .adoc files
-                adoc_preprocessed = 0
-                files_copied = 0
+            preprocessed_content, _ = preprocess_adoc_tables(content)
 
-                def copy_and_preprocess(src, dst):
-                    nonlocal adoc_preprocessed, files_copied
-                    if Path(src).suffix == '.adoc':
-                        with open(src, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        # Apply all preprocessing steps
-                        preprocessed = preprocess_adoc_callout_numbering(content)  # Renumber callouts sequentially
-                        preprocessed = preprocess_adoc_callouts(preprocessed)      # Add [source,...] if missing
-                        preprocessed = preprocess_adoc_tables(preprocessed)        # Fix tables
-                        with open(dst, 'w', encoding='utf-8') as f:
-                            f.write(preprocessed)
-                        adoc_preprocessed += 1
-                    else:
-                        shutil.copy2(src, dst)
-                    files_copied += 1
-                    return dst
-
-                # Copy the tree, following symlinks and preprocessing .adoc files
-                shutil.copytree(
-                    base_dir,
-                    temp_base_path,
-                    copy_function=copy_and_preprocess,
-                    symlinks=False,  # Follow symlinks
-                    dirs_exist_ok=True
-                )
-
-                LOG.info(f"Copied {files_copied} files ({adoc_preprocessed} .adoc files preprocessed)")
-
-                # Now use the preprocessed file
-                preprocessed_path = temp_base_path / input_path.relative_to(base_dir)
-                LOG.info(f"Using preprocessed file: {preprocessed_path}")
-
-            except Exception as e:
-                LOG.error(f"Failed to preprocess directory: {e}")
-                # Fall back to simple preprocessing
-                with open(input_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                preprocessed_content = preprocess_adoc_callouts(content)
-                preprocessed_content = preprocess_adoc_tables(preprocessed_content)
-
-                preprocessed_temp = tempfile.NamedTemporaryFile(
-                    mode='w',
-                    suffix='.adoc',
-                    delete=False,
-                    encoding='utf-8',
-                    dir=str(base_dir.absolute())
-                )
-                preprocessed_temp.write(preprocessed_content)
-                preprocessed_temp.flush()
-                preprocessed_temp.close()
-                preprocessed_path = Path(preprocessed_temp.name)
+            # Create temporary file with preprocessed content in the base directory
+            preprocessed_temp = tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.adoc',
+                delete=False,
+                encoding='utf-8',
+                dir=str(base_dir.absolute())
+            )
+            preprocessed_temp.write(preprocessed_content)
+            preprocessed_temp.flush()
+            preprocessed_temp.close()
+            preprocessed_path = Path(preprocessed_temp.name)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as xml_temp:
                 xml_temp_path = Path(xml_temp.name)
                 xml_temp.close()
 
                 try:
-                    # Determine which base directory to use
-                    conversion_base_dir = temp_base_path if temp_base_path.exists() else base_dir
-
                     # If attributes file is provided, create a wrapper file with includes
                     # The wrapper file must be in the base directory structure
                     if self.attributes_file:
@@ -1055,14 +1241,14 @@ class DocsConverter:
                             suffix=".adoc",
                             delete=False,
                             encoding='utf-8',
-                            dir=str(conversion_base_dir.absolute())
+                            dir=str(base_dir.absolute())
                         )
                         adoc_temp.write(f"include::{self.attributes_file.absolute()}[]\n\ninclude::{preprocessed_path.absolute()}[]\n")
                         adoc_temp.flush()
                         adoc_temp.close()
                         input_for_conversion = Path(adoc_temp.name)
                     else:
-                        input_for_conversion = preprocessed_path
+                        input_for_conversion = input_path
 
                     # Step 1: Convert AsciiDoc to DocBook5 XML
                     asciidoctor_cmd = [
@@ -1070,7 +1256,7 @@ class DocsConverter:
                         "-b", "docbook5",
                         "-d", "book",
                         "-a", "fn-private=pass",
-                        "--base-dir", str(conversion_base_dir.absolute()),
+                        "--base-dir", str(base_dir.absolute()),
                         "-o", str(xml_temp_path.absolute()),
                         str(input_for_conversion.absolute()),
                     ]
@@ -1078,15 +1264,12 @@ class DocsConverter:
                     if result.stderr:
                         LOG.warning("asciidoctor warnings for %s:\n%s", input_path, result.stderr)
 
-                    # Step 1.5: Preprocess XML to fix nesting issues and convert list titles
+                    # Step 1.5: Preprocess XML to convert list titles to formalpara
+                    # Note: We no longer need fix_xml_nesting_with_parser because we fixed
+                    # the source .adoc files with preprocess_adoc_link_brackets
                     with open(xml_temp_path, 'r', encoding='utf-8') as f:
                         xml_content = f.read()
 
-                    # First fix nesting issues with inline elements
-                    # Use targeted parser-based fix for specific malformed patterns
-                    xml_content = fix_xml_nesting_with_parser(xml_content)
-
-                    # Then convert list titles to formalpara
                     preprocessed_xml = preprocess_xml_list_titles(xml_content)
 
                     with open(xml_temp_path, 'w', encoding='utf-8') as f:
@@ -1134,18 +1317,12 @@ class DocsConverter:
                         xml_temp_path.unlink()
                     if adoc_temp and Path(adoc_temp.name).exists():
                         Path(adoc_temp.name).unlink()
-                    # Clean up temp directory if it was created
-                    if temp_base_path and temp_base_path.exists():
-                        import shutil
-                        shutil.rmtree(temp_base_path, ignore_errors=True)
 
         except Exception as e:
-            LOG.error("Failed during preprocessing: %s (%s)", input_path, e)
-            # Clean up temp directory on error too
-            if 'temp_base_path' in locals() and temp_base_path and temp_base_path.exists():
-                import shutil
-                shutil.rmtree(temp_base_path, ignore_errors=True)
+            LOG.error("Failed during conversion: %s (%s)", input_path, e)
             raise
+
+        return
 
 
 if __name__ == "__main__":
@@ -1154,6 +1331,7 @@ if __name__ == "__main__":
 
     failed_conversions = []
     successful_conversions = []
+    all_fixes = {}  # Accumulate all fixes across all conversions
 
     if args.input_dir:
         docs_converter = DocsConverter(attributes_file=args.attributes_file)
@@ -1165,8 +1343,12 @@ if __name__ == "__main__":
             args.remap_titles,
         ):
             try:
-                docs_converter.convert(input_path, output_path)
+                fixes_by_file = docs_converter.convert(input_path, output_path) or {}
                 successful_conversions.append(str(input_path))
+                # Merge fixes into all_fixes
+                for file_path, fixes in fixes_by_file.items():
+                    if file_path not in all_fixes:
+                        all_fixes[file_path] = fixes
             except Exception as e:
                 failed_conversions.append((str(input_path), str(e)))
                 LOG.error("Continuing with next document after failure...")
@@ -1179,8 +1361,12 @@ if __name__ == "__main__":
             args.docs_version,
         ):
             try:
-                relnotes_converter.convert(input_path, output_path)
+                fixes_by_file = relnotes_converter.convert(input_path, output_path)
                 successful_conversions.append(str(input_path))
+                # Merge fixes into all_fixes
+                for file_path, fixes in fixes_by_file.items():
+                    if file_path not in all_fixes:
+                        all_fixes[file_path] = fixes
             except Exception as e:
                 failed_conversions.append((str(input_path), str(e)))
                 LOG.error("Continuing with next document after failure...")
@@ -1197,4 +1383,15 @@ if __name__ == "__main__":
             LOG.info(f"  - {path}")
             LOG.info(f"    Error: {error[:100]}...")  # First 100 chars of error
 
-    LOG.info("="*80)
+    if all_fixes:
+        LOG.info("\n" + "-"*80)
+        LOG.info(f"SOURCE FILE FIXES APPLIED:")
+        LOG.info(f"  Total files fixed: {len(all_fixes)}")
+        LOG.info("\nFiles with fixes:")
+        for file_path in sorted(all_fixes.keys()):
+            fixes = all_fixes[file_path]
+            LOG.info(f"\n  {file_path}:")
+            for fix in fixes:
+                LOG.info(f"    - {fix}")
+
+    LOG.info("\n" + "="*80)
