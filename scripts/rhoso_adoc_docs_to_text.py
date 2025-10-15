@@ -1274,6 +1274,75 @@ def preprocess_xml_escape_angle_brackets(xml_content: str) -> str:
     return result
 
 
+def preprocess_xml_undefined_entities(xml_content: str) -> str:
+    """Replace undefined XML entities with their proper representations.
+
+    AsciiDoc may generate entities like &verbar; which are not standard XML entities.
+    This function replaces them with their numeric entity equivalents or the actual character.
+
+    Args:
+        xml_content: The DocBook XML content as a string
+
+    Returns:
+        XML content with undefined entities replaced
+    """
+    # Map of undefined entities to their replacements
+    # Using numeric entities or actual characters that are XML-safe
+    entity_replacements = {
+        '&verbar;': '&#124;',  # Vertical bar |
+        '&vert;': '&#124;',    # Alternative vertical bar
+        '&lsqb;': '&#91;',     # Left square bracket [
+        '&rsqb;': '&#93;',     # Right square bracket ]
+        '&lcub;': '&#123;',    # Left curly brace {
+        '&rcub;': '&#125;',    # Right curly brace }
+        '&sol;': '&#47;',      # Solidus /
+        '&bsol;': '&#92;',     # Reverse solidus \
+        '&comma;': '&#44;',    # Comma ,
+        '&period;': '&#46;',   # Period .
+        '&colon;': '&#58;',    # Colon :
+        '&semi;': '&#59;',     # Semicolon ;
+        '&equals;': '&#61;',   # Equals sign =
+        '&plus;': '&#43;',     # Plus sign +
+        '&ast;': '&#42;',      # Asterisk *
+        '&num;': '&#35;',      # Number sign #
+        '&percnt;': '&#37;',   # Percent sign %
+        '&dollar;': '&#36;',   # Dollar sign $
+        '&commat;': '&#64;',   # Commercial at @
+        '&excl;': '&#33;',     # Exclamation mark !
+        '&quest;': '&#63;',    # Question mark ?
+        '&grave;': '&#96;',    # Grave accent `
+        '&Hat;': '&#94;',      # Circumflex accent ^
+        '&tilde;': '&#126;',   # Tilde ~
+    }
+
+    # Replace each undefined entity
+    for entity, replacement in entity_replacements.items():
+        if entity in xml_content:
+            xml_content = xml_content.replace(entity, replacement)
+            LOG.debug(f"Replaced {entity} with {replacement}")
+
+    # Fix incomplete HTML/XML entities that are missing the closing semicolon
+    # This handles cases where &lt, &gt, &amp, &quot, &apos appear without semicolons
+    # But we need to be careful not to break valid text
+    # Pattern: Find &lt, &gt, &amp, &quot, &apos followed by non-alphanumeric (but not semicolon)
+    import re
+
+    # Fix common incomplete entities: &lt &gt &amp &quot &apos
+    # Only fix if followed by a space, <, >, or end of attribute/tag
+    def fix_incomplete_entity(match):
+        entity = match.group(1)
+        following = match.group(2)
+        # Add the semicolon
+        return f'&{entity};{following}'
+
+    # Match &(lt|gt|amp|quot|apos) followed by something that's not a semicolon or letter
+    # This ensures we don't break &ltfoo; into &lt;foo;
+    pattern = r'&(lt|gt|amp|quot|apos)(?!;|[a-zA-Z])(\s|<|>|"|\||$)'
+    xml_content = re.sub(pattern, fix_incomplete_entity, xml_content)
+
+    return xml_content
+
+
 def preprocess_xml_list_titles(xml_content: str) -> str:
     """Preprocess XML to convert list titles to formalpara elements.
 
@@ -1437,6 +1506,16 @@ class RelNotesConverter:
                 ]
                 subprocess.run(asciidoctor_cmd, check=True, capture_output=True)
 
+                # Step 1.5: Preprocess XML to fix issues
+                with open(xml_temp_path, 'r', encoding='utf-8') as f:
+                    xml_content = f.read()
+
+                # Replace undefined XML entities
+                preprocessed_xml = preprocess_xml_undefined_entities(xml_content)
+
+                with open(xml_temp_path, 'w', encoding='utf-8') as f:
+                    f.write(preprocessed_xml)
+
                 # Step 2: Convert DocBook5 XML to Markdown using pandoc with filter
                 pandoc_cmd = [
                     "pandoc",
@@ -1582,6 +1661,9 @@ class DocsConverter:
 
                     # First escape any invalid angle brackets (like <key=value>)
                     preprocessed_xml = preprocess_xml_escape_angle_brackets(xml_content)
+
+                    # Replace undefined XML entities before parsing
+                    preprocessed_xml = preprocess_xml_undefined_entities(preprocessed_xml)
 
                     # Then convert list titles to formalpara
                     preprocessed_xml = preprocess_xml_list_titles(preprocessed_xml)
