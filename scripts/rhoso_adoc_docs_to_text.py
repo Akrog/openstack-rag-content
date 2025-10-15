@@ -345,11 +345,11 @@ def preprocess_adoc_link_brackets(content: str, file_path: Path = None) -> tuple
 
 
 def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> tuple[str, list[str]]:
-    """Renumber callouts to be sequential within each list item scope.
+    """Renumber callouts to be sequential within each code block.
 
-    AsciiDoctor expects callouts to be numbered sequentially within their scope.
-    When callouts appear within list items (like procedure steps), they should
-    restart at <1> for each list item. Otherwise, they're numbered globally.
+    AsciiDoc callouts should be scoped to individual code blocks. Each block
+    should have callouts numbered starting from <1>, regardless of what numbers
+    were used in the source.
 
     Args:
         content: The raw AsciiDoc content as a string
@@ -359,24 +359,14 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
         Tuple of (fixed_content, list of fix descriptions)
     """
     lines = content.split('\n')
-    global_callout_number = 1
-    renumber_map = {}  # Maps (block_index, local_number) -> global_number
-    block_callouts = []  # List of (block_index, list_item_num, [local_numbers_in_order])
+    renumber_map = {}  # Maps (block_index, original_number) -> new_number
+    block_callouts = []  # List of (block_index, [original_numbers_in_order])
     block_index = 0
     in_block = False
     current_block_callouts = []
-    current_list_item = 0
-
-    # Pattern to detect list items (numbered or bulleted)
-    list_item_pattern = re.compile(r'^(\.|\.{2,}|\*|\*{2,})\s+')
 
     # First pass: identify all callouts in blocks and build renumber map
     for i, line in enumerate(lines):
-        # Check if this is a new list item (resets callout numbering)
-        if list_item_pattern.match(line):
-            current_list_item += 1
-            global_callout_number = 1  # Reset numbering for new list item
-
         if line.strip() == '----':
             if not in_block:
                 in_block = True
@@ -385,15 +375,16 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
             else:
                 in_block = False
                 if current_block_callouts:
-                    block_callouts.append((block_index, current_list_item, list(current_block_callouts)))
+                    # Renumber callouts for this block starting from 1
+                    for new_num, original_num in enumerate(current_block_callouts, start=1):
+                        renumber_map[(block_index, original_num)] = new_num
+                    block_callouts.append((block_index, list(current_block_callouts)))
         elif in_block:
-            # Find callouts in this line
+            # Find callouts in this line (in order of appearance)
             for match in re.finditer(r'<(\d+)>', line):
-                local_num = int(match.group(1))
-                if local_num not in current_block_callouts:
-                    current_block_callouts.append(local_num)
-                    renumber_map[(block_index, local_num)] = global_callout_number
-                    global_callout_number += 1
+                original_num = int(match.group(1))
+                if original_num not in current_block_callouts:
+                    current_block_callouts.append(original_num)
 
     if not renumber_map:
         # No callouts to renumber
@@ -404,8 +395,8 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
     in_block = False
     block_index = 0
     callout_definition_pattern = re.compile(r'^<(\d+)>\s+')
-    # Track which block we're processing definitions for
-    definition_block_queue = list(block_callouts)  # Queue of (block_index, list_item, [local_nums])
+    # Track which block's definitions we're expecting
+    definition_block_queue = list(block_callouts)  # Queue of (block_index, [original_nums])
     current_definition_block = None
     current_definition_callouts = []
     definition_index = 0
@@ -422,30 +413,30 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
             # Renumber callouts in code blocks
             new_line = line
             for match in reversed(list(re.finditer(r'<(\d+)>', line))):
-                local_num = int(match.group(1))
-                if (block_index, local_num) in renumber_map:
-                    global_num = renumber_map[(block_index, local_num)]
-                    new_line = new_line[:match.start()] + f'<{global_num}>' + new_line[match.end():]
+                original_num = int(match.group(1))
+                if (block_index, original_num) in renumber_map:
+                    new_num = renumber_map[(block_index, original_num)]
+                    new_line = new_line[:match.start()] + f'<{new_num}>' + new_line[match.end():]
             new_lines.append(new_line)
         else:
             # Check if this is a callout definition line
             match = callout_definition_pattern.match(line)
             if match:
-                local_num = int(match.group(1))
+                original_num = int(match.group(1))
 
                 # If we haven't set up the current definition block yet, or we've
                 # processed all callouts for the current block, move to the next block
                 if not current_definition_callouts and definition_block_queue:
-                    current_definition_block, _, current_definition_callouts = definition_block_queue.pop(0)
+                    current_definition_block, current_definition_callouts = definition_block_queue.pop(0)
                     definition_index = 0
 
                 # Check if this callout matches the next expected callout for current block
                 if (current_definition_callouts and
                     definition_index < len(current_definition_callouts) and
-                    local_num == current_definition_callouts[definition_index]):
+                    original_num == current_definition_callouts[definition_index]):
                     # Match! Renumber it
-                    global_num = renumber_map[(current_definition_block, local_num)]
-                    new_line = callout_definition_pattern.sub(f'<{global_num}> ', line)
+                    new_num = renumber_map[(current_definition_block, original_num)]
+                    new_line = callout_definition_pattern.sub(f'<{new_num}> ', line)
                     new_lines.append(new_line)
                     definition_index += 1
                     # If we've processed all callouts for this block, clear it
@@ -462,7 +453,171 @@ def preprocess_adoc_callout_numbering(content: str, file_path: Path = None) -> t
     total_callouts = len(renumber_map)
     fixes = []
     if total_callouts > 0:
-        fixes.append(f"Renumbered {total_callouts} callout(s) with proper scoping")
+        fixes.append(f"Renumbered {total_callouts} callout(s) with block-level scoping")
+
+    return '\n'.join(new_lines), fixes
+
+
+def preprocess_adoc_callout_placement(content: str, file_path: Path = None) -> tuple[str, list[str]]:
+    """Move callout definitions to immediately after their code blocks.
+
+    Callout definitions should appear right after the code block they reference,
+    not bundled at the end. This function reorganizes them properly and splits
+    bundled definitions.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
+
+    Returns:
+        Tuple of (fixed_content, list of fix descriptions)
+    """
+    lines = content.split('\n')
+    fixes = []
+
+    # First pass: identify blocks with callouts
+    block_info = []  # List of (block_start, block_end, max_callout_num)
+    in_block = False
+    block_start = -1
+    block_callouts = []
+
+    for i, line in enumerate(lines):
+        if line.strip() == '----':
+            if not in_block:
+                in_block = True
+                block_start = i
+                block_callouts = []
+            else:
+                in_block = False
+                if block_callouts:
+                    max_callout = max(block_callouts)
+                    block_info.append((block_start, i, max_callout))
+        elif in_block:
+            # Find callouts in this line
+            for match in re.finditer(r'<(\d+)>', line):
+                block_callouts.append(int(match.group(1)))
+
+    if not block_info:
+        return content, []
+
+    # Second pass: collect all callout definition lines (tracking individual definitions)
+    callout_definition_pattern = re.compile(r'^<(\d+)>\s+')
+    all_definitions = []  # List of (line_idx, callout_num, line_content)
+
+    for i, line in enumerate(lines):
+        match = callout_definition_pattern.match(line)
+        if match:
+            callout_num = int(match.group(1))
+            all_definitions.append((i, callout_num, line))
+
+    if not all_definitions:
+        return content, []
+
+    # Third pass: Match definitions to blocks in order
+    # Each block gets the next N definitions (where N is the number of callouts in that block)
+    lines_to_skip = set()
+    insertions = {}  # Maps block_end_line to list of (lines, context_lines) to insert
+    definition_idx = 0
+
+    for block_start, block_end, max_callout in block_info:
+        # This block needs definitions for callouts <1> through <max_callout>
+        num_defs_needed = max_callout
+
+        # Check if definitions are already right after this block
+        defs_after_block = []
+        check_idx = block_end + 1
+        while check_idx < len(lines) and len(defs_after_block) < num_defs_needed:
+            # Skip empty lines and ifeval/endif lines
+            line = lines[check_idx]
+            if callout_definition_pattern.match(line):
+                def_num = int(callout_definition_pattern.match(line).group(1))
+                defs_after_block.append(def_num)
+            elif line.strip() and not line.strip().startswith(('ifeval::', 'endif::')):
+                # Hit a non-definition, non-wrapper line
+                break
+            check_idx += 1
+
+        # Check if we have the right definitions already in place
+        expected_defs = list(range(1, max_callout + 1))
+        if defs_after_block == expected_defs:
+            # Definitions are already in the right place
+            definition_idx += num_defs_needed
+            continue
+
+        # Collect the N definition lines for this block
+        block_def_lines = []
+
+        if definition_idx < len(all_definitions):
+            # Check if these definitions are wrapped in an ifeval block
+            first_def_idx = all_definitions[definition_idx][0]
+            last_def_idx = all_definitions[min(definition_idx + num_defs_needed - 1, len(all_definitions) - 1)][0]
+
+            # Look for ifeval wrapper before the first definition
+            has_ifeval_wrapper = False
+            ifeval_line = None
+            for j in range(first_def_idx - 1, max(0, first_def_idx - 3), -1):
+                if lines[j].strip().startswith('ifeval::'):
+                    has_ifeval_wrapper = True
+                    ifeval_line = lines[j]
+                    break
+                elif lines[j].strip():  # Hit a non-empty, non-ifeval line
+                    break
+
+            # Collect just the definition lines we need (not the entire context)
+            for i in range(num_defs_needed):
+                if definition_idx + i < len(all_definitions):
+                    def_line_idx, def_num, def_line = all_definitions[definition_idx + i]
+                    block_def_lines.append(def_line)
+                    lines_to_skip.add(def_line_idx)
+
+            # If there was an ifeval wrapper, wrap these definitions
+            if has_ifeval_wrapper and ifeval_line:
+                block_def_lines = [ifeval_line] + block_def_lines + ['endif::[]']
+                # Mark the original ifeval/endif for removal if all definitions are being moved
+                # (We'll handle this by marking individual definition lines only)
+
+            # Schedule insertion after the block
+            if block_end not in insertions:
+                insertions[block_end] = []
+            insertions[block_end].extend(block_def_lines)
+            insertions[block_end].append('')  # Add blank line after definitions
+
+            fixes.append(f"Moved {num_defs_needed} callout definition(s) to after block at line {block_end + 1}")
+            definition_idx += num_defs_needed
+
+    # Also remove any ifeval/endif wrappers that only contained definitions we moved
+    # Scan for ifevals that now have no content between them
+    i = 0
+    while i < len(lines):
+        if i not in lines_to_skip and lines[i].strip().startswith('ifeval::'):
+            # Check if the next non-skipped, non-empty line is an endif
+            j = i + 1
+            found_content = False
+            while j < len(lines):
+                if j not in lines_to_skip:
+                    if lines[j].strip().startswith('endif::'):
+                        # Empty ifeval block, mark both for removal
+                        lines_to_skip.add(i)
+                        lines_to_skip.add(j)
+                        break
+                    elif lines[j].strip():
+                        # Found content, keep the ifeval
+                        found_content = True
+                        break
+                j += 1
+        i += 1
+
+    if not lines_to_skip and not insertions:
+        return content, []
+
+    # Build the new content
+    new_lines = []
+    for i, line in enumerate(lines):
+        if i not in lines_to_skip:
+            new_lines.append(line)
+            # Insert definitions after this line if needed
+            if i in insertions:
+                new_lines.extend(insertions[i])
 
     return '\n'.join(new_lines), fixes
 
@@ -635,6 +790,9 @@ def fix_adoc_file(file_path: Path) -> list[str]:
     all_fixes.extend(fixes)
 
     content, fixes = preprocess_adoc_callout_numbering(content, file_path)
+    all_fixes.extend(fixes)
+
+    content, fixes = preprocess_adoc_callout_placement(content, file_path)
     all_fixes.extend(fixes)
 
     content, fixes = preprocess_adoc_callouts(content, file_path)
