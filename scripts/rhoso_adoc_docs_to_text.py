@@ -622,6 +622,89 @@ def preprocess_adoc_callout_placement(content: str, file_path: Path = None) -> t
     return '\n'.join(new_lines), fixes
 
 
+def preprocess_adoc_callout_spacing(content: str, file_path: Path = None) -> tuple[str, list[str]]:
+    """Ensure blank lines after callout definition sections.
+
+    Callout definitions should always be followed by a blank line for proper
+    AsciiDoc formatting and to avoid confusing the parser.
+
+    Args:
+        content: The raw AsciiDoc content as a string
+        file_path: Path to the file being processed (for logging)
+
+    Returns:
+        Tuple of (fixed_content, list of fix descriptions)
+    """
+    lines = content.split('\n')
+    fixes = []
+    callout_definition_pattern = re.compile(r'^<(\d+)>\s+')
+
+    # Find the end of each callout definition section and ensure blank line after
+    new_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        new_lines.append(line)
+
+        # Check if this is a callout definition
+        if callout_definition_pattern.match(line):
+            # Found a callout definition, look for the end of this section
+            j = i + 1
+            last_def_line = i
+
+            # Scan forward to find all consecutive callout definitions
+            # (may be wrapped in ifeval/endif blocks)
+            while j < len(lines):
+                current_line = lines[j]
+
+                if callout_definition_pattern.match(current_line):
+                    # Another definition, update the last position
+                    last_def_line = j
+                    j += 1
+                elif current_line.strip().startswith('endif::'):
+                    # Could be the end of an ifeval wrapper
+                    last_def_line = j
+                    j += 1
+                    # Check if next line is another definition or ifeval
+                    if j < len(lines):
+                        next_line = lines[j]
+                        if (callout_definition_pattern.match(next_line) or
+                            next_line.strip().startswith('ifeval::')):
+                            continue
+                        else:
+                            break
+                    else:
+                        break
+                elif current_line.strip().startswith('ifeval::'):
+                    # Continuation of wrapped definitions
+                    j += 1
+                elif current_line.strip() == '':
+                    # Empty line, we're good
+                    break
+                else:
+                    # Hit a non-definition, non-wrapper line
+                    last_def_line = j - 1
+                    break
+
+            # Now append all lines from i+1 to last_def_line
+            for k in range(i + 1, last_def_line + 1):
+                new_lines.append(lines[k])
+
+            # Check if there's already a blank line after the definitions
+            next_idx = last_def_line + 1
+            if next_idx < len(lines):
+                if lines[next_idx].strip() != '':
+                    # No blank line, add one
+                    new_lines.append('')
+                    fixes.append(f"Line {last_def_line + 1}: Added blank line after callout definitions")
+
+            i = last_def_line + 1
+        else:
+            i += 1
+
+    return '\n'.join(new_lines), fixes
+
+
 def preprocess_adoc_callouts(content: str, file_path: Path = None) -> tuple[str, list[str]]:
     """Preprocess AsciiDoc to add source designation to blocks with callouts.
 
@@ -796,6 +879,9 @@ def fix_adoc_file(file_path: Path) -> list[str]:
     all_fixes.extend(fixes)
 
     content, fixes = preprocess_adoc_callouts(content, file_path)
+    all_fixes.extend(fixes)
+
+    content, fixes = preprocess_adoc_callout_spacing(content, file_path)
     all_fixes.extend(fixes)
 
     content, fixes = preprocess_adoc_tables(content, file_path)
