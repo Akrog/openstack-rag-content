@@ -1766,6 +1766,8 @@ class RelNotesConverter:
 
                 LOG.info("Successfully converted: %s -> %s", input_path, output_path)
 
+                return fixes_by_file
+
             except Exception as e:
                 LOG.error("Failed to convert: %s -> %s (%s)", input_path, output_path, e)
                 raise
@@ -2006,7 +2008,8 @@ if __name__ == "__main__":
                         all_fixes[file_path] = fixes
             except Exception as e:
                 failed_conversions.append((str(input_path), str(e)))
-                LOG.error("Continuing with next document after failure...")
+                LOG.error("Failed to convert %s: %s", input_path, str(e))
+                LOG.error("Continuing with next document...")
 
     if args.relnotes_dir:
         relnotes_converter = RelNotesConverter(attributes_file=args.attributes_file)
@@ -2024,7 +2027,8 @@ if __name__ == "__main__":
                         all_fixes[file_path] = fixes
             except Exception as e:
                 failed_conversions.append((str(input_path), str(e)))
-                LOG.error("Continuing with next document after failure...")
+                LOG.error("Failed to convert %s: %s", input_path, str(e))
+                LOG.error("Continuing with next document...")
 
     # Print summary
     LOG.info("\n" + "="*80)
