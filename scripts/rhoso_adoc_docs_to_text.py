@@ -1617,6 +1617,7 @@ class RelNotesConverter:
     """Convert AsciiDoc release notes to Markdown using asciidoctor and pandoc."""
     PANDOC_FILTER_PATH = (Path(__file__).parent / "pandoc-release_notes-filter.py").absolute()
     PANDOC_LUA_FILTER_PATH = (Path(__file__).parent / "tightlists.lua").absolute()
+    PANDOC_LUA_CODEBLOCK_FIX_PATH = (Path(__file__).parent / "fix-codeblock-tables.lua").absolute()
 
     def __init__(self, attributes_file: Path | None = None):
         self.attributes_file = attributes_file
@@ -1729,7 +1730,7 @@ class RelNotesConverter:
                 with open(xml_temp_path, 'w', encoding='utf-8') as f:
                     f.write(preprocessed_xml)
 
-                # Step 2: Convert DocBook5 XML to Markdown using pandoc with filter
+                # Step 2: Convert DocBook5 XML to Markdown using pandoc with filters
                 pandoc_cmd = [
                     "pandoc",
                     "-f", "docbook",
@@ -1737,6 +1738,7 @@ class RelNotesConverter:
                     "-t", "markdown-simple_tables-multiline_tables-grid_tables+pipe_tables",
                     f"--filter={self.PANDOC_FILTER_PATH}",
                     f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
+                    f"--lua-filter={self.PANDOC_LUA_CODEBLOCK_FIX_PATH}",
                     str(xml_temp_path.absolute()),
                     "-o", str(output_path.absolute()),
                 ]
@@ -1752,12 +1754,15 @@ class RelNotesConverter:
                     f.write(markdown_content)
 
                 # Step 4: Compact pipe tables by removing extra spaces before pipes
-                compact_cmd = [
-                    'sed', '-i', '-E',
-                    's/ +\\|/ |/g',
-                    str(output_path.absolute())
-                ]
-                subprocess.run(compact_cmd, check=True)
+                # NOTE: Disabled for now - the sed pattern affects code blocks too
+                # The Lua filter ensures code blocks have correct indentation
+                # TODO: Create a smarter sed pattern or do this in the Lua filter
+                # compact_cmd = [
+                #     'sed', '-i', '-E',
+                #     's/ +\\|/ |/g',
+                #     str(output_path.absolute())
+                # ]
+                # subprocess.run(compact_cmd, check=True)
 
                 LOG.info("Successfully converted: %s -> %s", input_path, output_path)
 
@@ -1775,6 +1780,7 @@ class DocsConverter:
     """Convert AsciiDoc documentation to Markdown using asciidoctor and pandoc."""
     PANDOC_FILTER_PATH = (Path(__file__).parent / "pandoc-docs-filter.py").absolute()
     PANDOC_LUA_FILTER_PATH = (Path(__file__).parent / "tightlists.lua").absolute()
+    PANDOC_LUA_CODEBLOCK_FIX_PATH = (Path(__file__).parent / "fix-codeblock-tables.lua").absolute()
 
     def __init__(self, attributes_file: Path | None = None):
         self.attributes_file = attributes_file
@@ -1904,7 +1910,7 @@ class DocsConverter:
                     with open(xml_temp_path, 'w', encoding='utf-8') as f:
                         f.write(preprocessed_xml)
 
-                    # Step 2: Convert DocBook5 XML to Markdown using pandoc with filter
+                    # Step 2: Convert DocBook5 XML to Markdown using pandoc with filters
                     pandoc_cmd = [
                         "pandoc",
                         "-f", "docbook",
@@ -1912,6 +1918,7 @@ class DocsConverter:
                         "-t", "markdown-simple_tables-multiline_tables-grid_tables+pipe_tables",
                         f"--filter={self.PANDOC_FILTER_PATH}",
                         f"--lua-filter={self.PANDOC_LUA_FILTER_PATH}",
+                        f"--lua-filter={self.PANDOC_LUA_CODEBLOCK_FIX_PATH}",
                         str(xml_temp_path.absolute()),
                         "-o", str(output_path.absolute()),
                     ]
@@ -1927,12 +1934,14 @@ class DocsConverter:
                         f.write(markdown_content)
 
                     # Step 4: Compact pipe tables by removing extra spaces before pipes
-                    compact_cmd = [
-                        'sed', '-i', '-E',
-                        's/ +\\|/ |/g',
-                        str(output_path.absolute())
-                    ]
-                    subprocess.run(compact_cmd, check=True)
+                    # NOTE: Disabled for now - the sed pattern affects code blocks too
+                    # TODO: Create a smarter sed pattern or do this in the Lua filter
+                    # compact_cmd = [
+                    #     'sed', '-i', '-E',
+                    #     's/ +\\|/ |/g',
+                    #     str(output_path.absolute())
+                    # ]
+                    # subprocess.run(compact_cmd, check=True)
 
                     LOG.info("Successfully converted: %s -> %s", input_path, output_path)
 
