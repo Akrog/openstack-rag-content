@@ -827,6 +827,39 @@ def preprocess_adoc_tables(content: str, file_path: Path = None) -> tuple[str, l
                 # Ending a table
                 table_lines.append(line)
 
+                # Remove standalone "|" or empty lines that appear right before the closing |===
+                # These create incomplete rows. But preserve standalone "|" after the opening |===
+                # as those are valid row delimiters in AsciiDoc.
+                while len(table_lines) > 2:  # Need at least opening |===, closing |===
+                    # Check lines before the closing |===
+                    prev_line = table_lines[-2].strip()
+                    # Only remove if it's a standalone "|" or empty line right before table close
+                    # AND it's not the first line after table open (which would be index 1)
+                    if (prev_line == '|' or prev_line == '') and len(table_lines) > 3:
+                        # Remove this problematic line
+                        removed_line = table_lines.pop(-2)
+                        if removed_line.strip():  # Only log if it was non-empty
+                            fixes.append(f"Line {table_start_idx + len(table_lines)}: Removed incomplete table row: '{removed_line.strip()}'")
+                    else:
+                        break
+
+                # Fix cells that start a new row after a blank line but don't have a leading |
+                # This can confuse the table parser. However, we need to be careful to only
+                # add | to the first line of a row, not to continuation lines within a cell.
+                # A line is a row start if:
+                # 1. Previous line is blank
+                # 2. The line before the blank ended with | (indicating end of a cell/row)
+                # 3. The current line doesn't start with |
+                for j in range(2, len(table_lines) - 1):  # Skip opening |=== and first line
+                    if (table_lines[j-1].strip() == '' and  # Previous line is blank
+                        table_lines[j].strip() and  # Current line has content
+                        not table_lines[j].strip().startswith('|')):  # Doesn't start with |
+                        # Check if the line before the blank ended with | (end of previous row)
+                        if j >= 2 and table_lines[j-2].rstrip().endswith('|'):
+                            # This is likely a new row starting
+                            table_lines[j] = '|' + table_lines[j]
+                            fixes.append(f"Line {table_start_idx + j + 1}: Added leading '|' to row start")
+
                 # Check if table has at least one body row
                 # Table structure: |===, optional header row, body rows, |===
                 # Body rows are those that contain | and are not the delimiters
@@ -852,7 +885,14 @@ def preprocess_adoc_tables(content: str, file_path: Path = None) -> tuple[str, l
         table_lines.append('|===')
         new_lines.extend(table_lines)
 
-    return '\n'.join(new_lines), fixes
+    # Join lines and ensure file ends with newline if it contained tables
+    result = '\n'.join(new_lines)
+
+    # Ensure the content ends with a newline
+    if result and not result.endswith('\n'):
+        result += '\n'
+
+    return result, fixes
 
 
 def fix_adoc_file(file_path: Path) -> list[str]:
