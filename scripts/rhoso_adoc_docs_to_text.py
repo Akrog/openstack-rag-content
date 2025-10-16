@@ -1461,7 +1461,8 @@ def preprocess_xml_table_cells(xml_content: str) -> str:
 
     Pandoc can only convert tables to pipe tables if cells contain inline content,
     not block-level elements like <simpara>. This function flattens table cells
-    by replacing <simpara><literal>text</literal></simpara> with just the text content.
+    by unwrapping ONLY the direct simpara/para child of entry elements, while
+    preserving any nested simpara/para tags inside lists or other structures.
 
     Args:
         xml_content: The DocBook XML content as a string
@@ -1469,36 +1470,47 @@ def preprocess_xml_table_cells(xml_content: str) -> str:
     Returns:
         Preprocessed XML with flattened table cells
     """
-    import re
+    try:
+        import xml.etree.ElementTree as ET_
 
-    # Pattern to match <entry> elements with <simpara> children
-    # We want to unwrap the simpara and keep just the inline content
-    # Pattern: <entry ...><simpara>CONTENT</simpara></entry>
-    # Replace with: <entry ...>CONTENT</entry>
+        # Parse the XML
+        root = ET_.fromstring(xml_content)
 
-    def flatten_cell(match):
-        entry_open = match.group(1)
-        cell_content = match.group(2)
-        entry_close = match.group(3)
+        # Define the DocBook namespace
+        ns = {'db': 'http://docbook.org/ns/docbook'}
 
-        # Remove simpara/para tags but keep the content
-        # Remove opening tags
-        cell_content = re.sub(r'<(?:ns\d+:)?(?:simpara|para)>', '', cell_content)
-        # Remove closing tags
-        cell_content = re.sub(r'</(?:ns\d+:)?(?:simpara|para)>', ' ', cell_content)
+        # Find all entry elements
+        for entry in root.findall(f'.//{{{ns["db"]}}}entry'):
+            # Check if the entry has exactly one child and it's a simpara or para
+            children = list(entry)
+            if len(children) == 1 and children[0].tag in (f'{{{ns["db"]}}}simpara', f'{{{ns["db"]}}}para'):
+                para_elem = children[0]
 
-        # Clean up multiple spaces
-        cell_content = re.sub(r'\s+', ' ', cell_content).strip()
+                # Move the para element's text to the entry
+                if para_elem.text:
+                    entry.text = (entry.text or '') + para_elem.text
 
-        return f'{entry_open}{cell_content}{entry_close}'
+                # Move all children of para to entry
+                for child in list(para_elem):
+                    entry.append(child)
 
-    # Match entry elements with simpara/para content
-    # This regex handles multi-line content and namespace prefixes
-    pattern = r'(<(?:ns\d+:)?entry[^>]*>)\s*<(?:ns\d+:)?(?:simpara|para)>(.*?)</(?:ns\d+:)?(?:simpara|para)>\s*(</(?:ns\d+:)?entry>)'
+                # Move the para element's tail (text after the element) to the last child or entry
+                if para_elem.tail:
+                    if len(entry) > 1:  # If there are children now
+                        last_child = list(entry)[-1]
+                        last_child.tail = (last_child.tail or '') + para_elem.tail
+                    else:
+                        entry.text = (entry.text or '') + para_elem.tail
 
-    xml_content = re.sub(pattern, flatten_cell, xml_content, flags=re.DOTALL)
+                # Remove the para element
+                entry.remove(para_elem)
 
-    return xml_content
+        # Convert back to string
+        return ET_.tostring(root, encoding='unicode')
+    except Exception as e:
+        LOG.warning(f"Failed to preprocess XML table cells: {e}")
+        # Return original content if preprocessing fails
+        return xml_content
 
 
 def preprocess_xml_list_titles(xml_content: str) -> str:
